@@ -1,0 +1,180 @@
+{
+  "base_url": "http://127.0.0.1:8090",
+  "transport": "http",
+  "reconstruction": "off",
+  "out": "/workspace/runs/clean_validation/verification_20261106T184137Z/readonly_mock/web_e2e",
+  "started": "20261106_184231",
+  "finished": "2026-11-06T18:43:24.323Z",
+  "passed": 28,
+  "failed": 0,
+  "results": [
+    {
+      "name": "static assets and headers",
+      "ok": true,
+      "detail": "932 ms",
+      "at": "2026-11-06T18:42:32.501Z"
+    },
+    {
+      "name": "overview",
+      "ok": true,
+      "detail": "camera preview + chain + summary + completion semantics",
+      "at": "2026-11-06T18:42:33.691Z"
+    },
+    {
+      "name": "monitor",
+      "ok": true,
+      "detail": "filters, visual controls, stale gate, POST classes",
+      "at": "2026-11-06T18:42:40.152Z"
+    },
+    {
+      "name": "debug",
+      "ok": true,
+      "detail": "recipes, parameter validation/filter, enable readback, single session, rounds, recovery/202/network/rejection",
+      "at": "2026-11-06T18:42:47.631Z"
+    },
+    {
+      "name": "analysis",
+      "ok": true,
+      "detail": "record session_20261106_184224",
+      "at": "2026-11-06T18:42:48.573Z"
+    },
+    {
+      "name": "force",
+      "ok": true,
+      "detail": "force data, CoP, FOV, disconnect, stale source",
+      "at": "2026-11-06T18:42:50.226Z"
+    },
+    {
+      "name": "accessibility",
+      "ok": true,
+      "detail": "skip link, aria-current, Escape dialog",
+      "at": "2026-11-06T18:42:51.068Z"
+    },
+    {
+      "name": "responsive 320 overview",
+      "ok": true,
+      "detail": "1586 ms",
+      "at": "2026-11-06T18:42:52.692Z"
+    },
+    {
+      "name": "responsive 320 monitor",
+      "ok": true,
+      "detail": "1646 ms",
+      "at": "2026-11-06T18:42:54.371Z"
+    },
+    {
+      "name": "responsive 320 debug",
+      "ok": true,
+      "detail": "1610 ms",
+      "at": "2026-11-06T18:42:56.061Z"
+    },
+    {
+      "name": "responsive 320 analysis",
+      "ok": true,
+      "detail": "1582 ms",
+      "at": "2026-11-06T18:42:57.678Z"
+    },
+    {
+      "name": "responsive 320 force",
+      "ok": true,
+      "detail": "1582 ms",
+      "at": "2026-11-06T18:42:59.294Z"
+    },
+    {
+      "name": "responsive 390 overview",
+      "ok": true,
+      "detail": "1637 ms",
+      "at": "2026-11-06T18:43:00.970Z"
+    },
+    {
+      "name": "responsive 390 monitor",
+      "ok": true,
+      "detail": "1807 ms",
+      "at": "2026-11-06T18:43:02.822Z"
+    },
+    {
+      "name": "responsive 390 debug",
+      "ok": true,
+      "detail": "1674 ms",
+      "at": "2026-11-06T18:43:04.539Z"
+    },
+    {
+      "name": "responsive 390 analysis",
+      "ok": true,
+      "detail": "1611 ms",
+      "at": "2026-11-06T18:43:06.185Z"
+    },
+    {
+      "name": "responsive 390 force",
+      "ok": true,
+      "detail": "1649 ms",
+      "at": "2026-11-06T18:43:07.867Z"
+    },
+    {
+      "name": "responsive 768 overview",
+      "ok": true,
+      "detail": "1591 ms",
+      "at": "2026-11-06T18:43:09.497Z"
+    },
+    {
+      "name": "responsive 768 monitor",
+      "ok": true,
+      "detail": "1660 ms",
+      "at": "2026-11-06T18:43:11.203Z"
+    },
+    {
+      "name": "responsive 768 debug",
+      "ok": true,
+      "detail": "1590 ms",
+      "at": "2026-11-06T18:43:12.828Z"
+    },
+    {
+      "name": "responsive 768 analysis",
+      "ok": true,
+      "detail": "1582 ms",
+      "at": "2026-11-06T18:43:14.442Z"
+    },
+    {
+      "name": "responsive 768 force",
+      "ok": true,
+      "detail": "1609 ms",
+      "at": "2026-11-06T18:43:16.085Z"
+    },
+    {
+      "name": "responsive 1440 overview",
+      "ok": true,
+      "detail": "1584 ms",
+      "at": "2026-11-06T18:43:17.708Z"
+    },
+    {
+      "name": "responsive 1440 monitor",
+      "ok": true,
+      "detail": "1664 ms",
+      "at": "2026-11-06T18:43:19.405Z"
+    },
+    {
+      "name": "responsive 1440 debug",
+      "ok": true,
+      "detail": "1604 ms",
+      "at": "2026-11-06T18:43:21.044Z"
+    },
+    {
+      "name": "responsive 1440 analysis",
+      "ok": true,
+      "detail": "1589 ms",
+      "at": "2026-11-06T18:43:22.670Z"
+    },
+    {
+      "name": "responsive 1440 force",
+      "ok": true,
+      "detail": "1593 ms",
+      "at": "2026-11-06T18:43:24.296Z"
+    },
+    {
+      "name": "responsive",
+      "ok": true,
+      "detail": "33235 ms",
+      "at": "2026-11-06T18:43:24.306Z"
+    }
+  ]
+}

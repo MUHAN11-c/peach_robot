@@ -1,0 +1,73 @@
+{
+  "passed": true,
+  "request": "deploy_acd92bb0b3f3",
+  "tool_enabled": false,
+  "wrapper_exit": 0,
+  "ledger": {
+    "claimed": [
+      "target_1",
+      "target_2"
+    ],
+    "outcomes": [
+      {
+        "target_id": "target_2",
+        "outcome": 1,
+        "reason": "build_failed: bag_axis_envelope_ill_conditioned; attempts=3; 局部重建完成：1 帧，3717 点（少于推荐 5 帧）；跳过 1 次（missing_mask=1）；重叠指标需 ≥2 帧，本批次不可用；TSDF 1135 点 / mesh 1991 顶点（累计积分 0.00s）；refit 失败（bag_axis_envelope_ill_conditioned）；refit 未产出可用几何",
+        "quality_score": 0.0,
+        "elapsed_s": 1.602,
+        "failure_code": "build_failed",
+        "failure_code_n": 2,
+        "completion_level": 0,
+        "stage_names": [
+          "finalize"
+        ],
+        "stage_durations": [
+          1.513
+        ],
+        "start_unix_ns": 1793990617567683033,
+        "end_unix_ns": 1793990619175310064,
+        "start_ros_ns": 1793990617567676943,
+        "end_ros_ns": 1793990619175299613,
+        "time_basis": "source_clock",
+        "clock_domain": "ros+system",
+        "cycle_id": "deploy_acd92bb0b3f3:target_2",
+        "scene_epoch": 1
+      },
+      {
+        "target_id": "target_1",
+        "outcome": 0,
+        "reason": "周期完成；tool.enabled=false 或未宣称采摘成功",
+        "quality_score": 0.0,
+        "elapsed_s": 18.41,
+        "completion_level": 6,
+        "stage_names": [
+          "finalize",
+          "approach_insert",
+          "reconfirm",
+          "tool",
+          "retreat"
+        ],
+        "stage_durations": [
+          0.431,
+          8.978,
+          0.2,
+          0.0,
+          8.67
+        ],
+        "start_unix_ns": 1793990621654463505,
+        "end_unix_ns": 1793990640070290189,
+        "start_ros_ns": 1793990621654457855,
+        "end_ros_ns": 1793990640070277818,
+        "time_basis": "source_clock",
+        "clock_domain": "ros+system",
+        "cycle_id": "deploy_acd92bb0b3f3:target_1",
+        "scene_epoch": 1
+      }
+    ]
+  },
+  "replay_paused": true,
+  "single_target_successes": 1,
+  "interpretation": "Single fruit L6; fixture cancels the batch; tool disabled.",
+  "residuals": [],
+  "cleanup_issues": []
+}

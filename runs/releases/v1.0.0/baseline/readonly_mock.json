@@ -1,0 +1,196 @@
+{
+  "passed": true,
+  "controllers": {
+    "joint_trajectory_controller": "active",
+    "dynamic_joint_state_broadcaster": "active",
+    "joint_state_broadcaster": "active"
+  },
+  "lifecycle": {
+    "peach_scene_perception_node": "active",
+    "peach_target_reconstruction_node": "active",
+    "peach_arm": "active",
+    "peach_supervisor": "active"
+  },
+  "plugins": {
+    "AuboE5System": "mock_components/GenericSystem"
+  },
+  "planning_scene_service_ready": true,
+  "counts": {
+    "/joint_states": 1056,
+    "/dynamic_joint_states": 988,
+    "/camera/depth/image_raw": 3,
+    "/camera/color/image_raw": 3,
+    "/camera/depth_registered/points": 3
+  },
+  "received": {
+    "/joint_states": {
+      "name": [
+        "shoulder_joint",
+        "upperArm_joint",
+        "foreArm_joint",
+        "wrist1_joint",
+        "wrist2_joint",
+        "wrist3_joint"
+      ],
+      "position": [
+        0.425175,
+        0.194274,
+        1.679546,
+        1.462579,
+        -0.279948,
+        0.038859
+      ],
+      "velocity": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "effort": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    "/dynamic_joint_states": {
+      "wrist3_joint": {
+        "position": 0.038859,
+        "velocity": 0.0
+      },
+      "shoulder_joint": {
+        "position": 0.425175,
+        "velocity": 0.0
+      },
+      "foreArm_joint": {
+        "position": 1.679546,
+        "velocity": 0.0
+      },
+      "wrist2_joint": {
+        "velocity": 0.0,
+        "position": -0.279948
+      },
+      "upperArm_joint": {
+        "velocity": 0.0,
+        "position": 0.194274
+      },
+      "speed_scaling": {
+        "speed_scaling_factor": 1.0
+      },
+      "wrist1_joint": {
+        "velocity": 0.0,
+        "position": 1.462579
+      },
+      "aubo_io": {
+        "health": null,
+        "send_rate_pps": null,
+        "joint_temp_5": null,
+        "joint_temp_4": null,
+        "joint_temp_1": null,
+        "power_on": null,
+        "tool_ai_0": null,
+        "joint_current_2": null,
+        "di_5": null,
+        "di_3": null,
+        "tag_vel_5": null,
+        "joint_current_4": null,
+        "rib_level": null,
+        "tool_di_0": null,
+        "di_8": null,
+        "tool_ai_1": null,
+        "joint_error_5": null,
+        "joint_error_4": null,
+        "joint_error_0": null,
+        "joint_error_3": null,
+        "tag_vel_4": null,
+        "tag_pos_3": null,
+        "tool_di_1": null,
+        "tag_vel_1": null,
+        "estop": null,
+        "di_12": null,
+        "joint_error_1": null,
+        "joint_error_2": null,
+        "send_queue_points": null,
+        "protective_stop": null,
+        "tag_pos_0": null,
+        "di_4": null,
+        "tag_pos_5": null,
+        "joint_temp_2": null,
+        "collision": null,
+        "tag_pos_2": null,
+        "event_code": null,
+        "di_0": null,
+        "joint_current_1": null,
+        "di_9": null,
+        "in_motion": null,
+        "tag_vel_3": null,
+        "ai_1": null,
+        "ai_3": null,
+        "ai_0": null,
+        "di_13": null,
+        "di_2": null,
+        "di_1": null,
+        "event_type": null,
+        "di_7": null,
+        "tag_pos_1": null,
+        "joint_temp_3": null,
+        "di_10": null,
+        "di_11": null,
+        "tag_pos_4": null,
+        "di_15": null,
+        "tag_vel_2": null,
+        "tag_vel_0": null,
+        "di_14": null,
+        "joint_current_0": null,
+        "joint_current_3": null,
+        "ai_2": null,
+        "di_6": null,
+        "joint_current_5": null,
+        "joint_temp_0": null
+      }
+    },
+    "/camera/depth/image_raw": {
+      "width": 640,
+      "height": 480,
+      "data_bytes": 614400
+    },
+    "/camera/color/image_raw": {
+      "width": 640,
+      "height": 480,
+      "data_bytes": 921600
+    },
+    "/camera/depth_registered/points": {
+      "width": 171892,
+      "height": 1,
+      "data_bytes": 4125408
+    }
+  },
+  "publishers": {
+    "/joint_states": [
+      "joint_state_broadcaster"
+    ],
+    "/dynamic_joint_states": [
+      "dynamic_joint_state_broadcaster"
+    ]
+  },
+  "pages": {
+    "/": 200,
+    "/overview.html": 200,
+    "/monitor.html": 200,
+    "/debug.html": 200,
+    "/analysis.html": 200,
+    "/force.html": 200
+  },
+  "enables": {
+    "execution_enabled": false,
+    "grasp_enabled": false,
+    "tool_enabled": false,
+    "action_active": false
+  },
+  "residuals": [],
+  "cleanup_issues": []
+}

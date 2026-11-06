@@ -1,0 +1,521 @@
+{
+  "status": "verified",
+  "verified_at": "2026-11-07T02:48:03.177352+08:00",
+  "scope": "Ubuntu Base rootfs isolation; CPU; Peach mock/replay only",
+  "workspace": "/home/wjz/peach_robot/aubo_e5_jazzy_ws",
+  "clean_room": "/home/wjz/peach_robot/clean_room_20261107",
+  "initial_environment": {
+    "ros": false,
+    "node": false,
+    "colcon": false,
+    "venv": false,
+    "build_install": false,
+    "host_home_mounted": false,
+    "host_package_caches_mounted": false,
+    "source_only_fixture_copied": true,
+    "namespace_root_mapping": "container uid 0 maps to the invoking host user"
+  },
+  "base_image": {
+    "url": "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-amd64.tar.gz",
+    "sha256": "e77b6f10c2590cef872b33ee9f635a0e3fd1f57fb074c0e52b5c7f56147a0c86"
+  },
+  "iteration_note": "Started from an empty Ubuntu Base rootfs; installer fixes were applied with explicit resume. All dependency additions are now in the delivered scripts/requirements.",
+  "isolation": {
+    "user": {
+      "host": "user:[4026531837]",
+      "runtime": "user:[4026533395]",
+      "different": true
+    },
+    "mnt": {
+      "host": "mnt:[4026531832]",
+      "runtime": "mnt:[4026533397]",
+      "different": true
+    },
+    "pid": {
+      "host": "pid:[4026531836]",
+      "runtime": "pid:[4026533403]",
+      "different": true
+    },
+    "ipc": {
+      "host": "ipc:[4026531839]",
+      "runtime": "ipc:[4026533401]",
+      "different": true
+    },
+    "net": {
+      "host": "net:[4026531833]",
+      "runtime": "net:[4026533404]",
+      "different": true
+    },
+    "uts": {
+      "host": "uts:[4026531838]",
+      "runtime": "uts:[4026533398]",
+      "different": true
+    }
+  },
+  "network_interfaces": [
+    "lo"
+  ],
+  "system_dependencies": "Main-chain rosdep check satisfied; explicit vendor and planner omissions provisioned by bootstrap",
+  "build": {
+    "packages": 45,
+    "package_names": [
+      "aubo_dashboard",
+      "aubo_description",
+      "aubo_e5_bringup",
+      "aubo_e5_controllers",
+      "aubo_e5_hardware",
+      "aubo_e5_moveit_config",
+      "aubo_hand_eye_calibration",
+      "aubo_msgs",
+      "aubo_ros2_web_dashboard",
+      "ivg_bringup",
+      "ivg_demo_services",
+      "ivg_description",
+      "ivg_foxglove_bridge",
+      "ivg_graspnet",
+      "ivg_interfaces",
+      "ivg_moveit_config",
+      "ivg_pose_estimation",
+      "ivg_sim",
+      "latte_backend",
+      "peach_arm",
+      "peach_bringup",
+      "peach_common",
+      "peach_harvester",
+      "peach_interfaces",
+      "peach_observability",
+      "peach_rviz_plugins",
+      "peach_scene_obstacles",
+      "peach_scene_perception",
+      "peach_stereo",
+      "peach_supervisor",
+      "peach_system_tests",
+      "peach_target_reconstruction",
+      "peach_vegetation",
+      "peach_vision_core",
+      "peach_web",
+      "percipio_camera",
+      "ros2_web_link",
+      "serial_force",
+      "sim_bringup",
+      "sim_description",
+      "sim_harvest",
+      "sim_perception",
+      "sim_system_tests",
+      "sim_worlds",
+      "tool_changer"
+    ],
+    "deploy_exit": 0,
+    "latest_log": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/deployment_20261106T184137Z/build.log",
+    "pip_check": "No broken requirements found."
+  },
+  "locked_requirements": [
+    {
+      "package": "numpy",
+      "version": "1.26.4",
+      "matches": true
+    },
+    {
+      "package": "setuptools",
+      "version": "78.1.0",
+      "matches": true
+    },
+    {
+      "package": "scipy",
+      "version": "1.11.4",
+      "matches": true
+    },
+    {
+      "package": "PyYAML",
+      "version": "6.0.1",
+      "matches": true
+    },
+    {
+      "package": "opencv-python",
+      "version": "4.11.0.86",
+      "matches": true
+    },
+    {
+      "package": "matplotlib",
+      "version": "3.11.1",
+      "matches": true
+    },
+    {
+      "package": "torch",
+      "version": "2.13.0+cpu",
+      "matches": true
+    },
+    {
+      "package": "torchvision",
+      "version": "0.28.0+cpu",
+      "matches": true
+    },
+    {
+      "package": "ultralytics",
+      "version": "8.3.0",
+      "matches": true
+    },
+    {
+      "package": "ultralytics-thop",
+      "version": "2.1.5",
+      "matches": true
+    },
+    {
+      "package": "tqdm",
+      "version": "4.67.1",
+      "matches": true
+    },
+    {
+      "package": "open3d",
+      "version": "0.19.0",
+      "matches": true
+    },
+    {
+      "package": "httpx",
+      "version": "0.27.2",
+      "matches": true
+    },
+    {
+      "package": "onnxruntime",
+      "version": "1.20.1",
+      "matches": true
+    },
+    {
+      "package": "pooch",
+      "version": "1.8.2",
+      "matches": true
+    },
+    {
+      "package": "pymatting",
+      "version": "1.1.15",
+      "matches": true
+    },
+    {
+      "package": "numba",
+      "version": "0.60.0",
+      "matches": true
+    },
+    {
+      "package": "llvmlite",
+      "version": "0.43.0",
+      "matches": true
+    },
+    {
+      "package": "trimesh",
+      "version": "4.5.3",
+      "matches": true
+    },
+    {
+      "package": "contourpy",
+      "version": "1.3.3",
+      "matches": true
+    },
+    {
+      "package": "cycler",
+      "version": "0.12.1",
+      "matches": true
+    },
+    {
+      "package": "fonttools",
+      "version": "4.63.0",
+      "matches": true
+    },
+    {
+      "package": "kiwisolver",
+      "version": "1.5.0",
+      "matches": true
+    },
+    {
+      "package": "packaging",
+      "version": "26.2",
+      "matches": true
+    },
+    {
+      "package": "pillow",
+      "version": "12.3.0",
+      "matches": true
+    },
+    {
+      "package": "pyparsing",
+      "version": "3.3.2",
+      "matches": true
+    },
+    {
+      "package": "python-dateutil",
+      "version": "2.9.0.post0",
+      "matches": true
+    },
+    {
+      "package": "six",
+      "version": "1.17.0",
+      "matches": true
+    },
+    {
+      "package": "fastapi",
+      "version": "0.101.0",
+      "matches": true
+    },
+    {
+      "package": "starlette",
+      "version": "0.27.0",
+      "matches": true
+    },
+    {
+      "package": "uvicorn",
+      "version": "0.27.1",
+      "matches": true
+    },
+    {
+      "package": "websockets",
+      "version": "12.0",
+      "matches": true
+    },
+    {
+      "package": "pytest",
+      "version": "7.4.4",
+      "matches": true
+    },
+    {
+      "package": "pytest-cov",
+      "version": "4.1.0",
+      "matches": true
+    },
+    {
+      "package": "semver",
+      "version": "3.0.2",
+      "matches": true
+    }
+  ],
+  "readonly_mock": {
+    "passed": true,
+    "controllers": {
+      "joint_trajectory_controller": "active",
+      "dynamic_joint_state_broadcaster": "active",
+      "joint_state_broadcaster": "active"
+    },
+    "lifecycle": {
+      "peach_scene_perception_node": "active",
+      "peach_target_reconstruction_node": "active",
+      "peach_arm": "active",
+      "peach_supervisor": "active"
+    },
+    "plugins": {
+      "AuboE5System": "mock_components/GenericSystem"
+    },
+    "planning_scene_service_ready": true,
+    "pages": {
+      "/": 200,
+      "/overview.html": 200,
+      "/monitor.html": 200,
+      "/debug.html": 200,
+      "/analysis.html": 200,
+      "/force.html": 200
+    },
+    "enables": {
+      "execution_enabled": false,
+      "grasp_enabled": false,
+      "tool_enabled": false,
+      "action_active": false
+    },
+    "residuals": [],
+    "cleanup_issues": []
+  },
+  "web": {
+    "passed": 28,
+    "failed": 0,
+    "widths": [
+      320,
+      390,
+      768,
+      1440
+    ],
+    "cjk_font_families": [
+      "Noto Serif CJK JP",
+      "Noto Serif CJK KR",
+      "Noto Serif CJK HK",
+      "Noto Serif CJK SC",
+      "Noto Serif CJK TC",
+      "Noto Sans Mono CJK SC",
+      "Noto Sans Mono CJK TC",
+      "Noto Sans Mono CJK JP",
+      "Noto Sans Mono CJK HK",
+      "Noto Sans Mono CJK KR",
+      "Noto Sans CJK HK",
+      "Noto Sans CJK KR",
+      "Noto Sans CJK JP",
+      "Noto Sans CJK SC",
+      "Noto Sans CJK TC"
+    ],
+    "visual_review": "Chinese labels readable after installing fonts-noto-cjk",
+    "report": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification_20261106T184137Z/readonly_mock/web_e2e/report.json",
+    "screenshot": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification_20261106T184137Z/readonly_mock/web_e2e/monitor_1440.png"
+  },
+  "frozen_grasp": {
+    "passed": true,
+    "request": "deploy_acd92bb0b3f3",
+    "tool_enabled": false,
+    "single_target_successes": 1,
+    "replay_paused": true,
+    "residuals": [],
+    "cleanup_issues": []
+  },
+  "frozen_result_lines": [
+    "RESULT status=STATUS_CANCELED success=False termination=CANCELED discovered=4 attempted=2 succeeded=1 failed=0 grasp_s=24.7 summary_elapsed=24.4s replay_paused=True"
+  ],
+  "frozen_outcomes": [
+    {
+      "target_id": "target_2",
+      "outcome": 1,
+      "reason": "build_failed: bag_axis_envelope_ill_conditioned; attempts=3; 局部重建完成：1 帧，3717 点（少于推荐 5 帧）；跳过 1 次（missing_mask=1）；重叠指标需 ≥2 帧，本批次不可用；TSDF 1135 点 / mesh 1991 顶点（累计积分 0.00s）；refit 失败（bag_axis_envelope_ill_conditioned）；refit 未产出可用几何",
+      "quality_score": 0.0,
+      "elapsed_s": 1.602,
+      "failure_code": "build_failed",
+      "failure_code_n": 2,
+      "completion_level": 0,
+      "stage_names": [
+        "finalize"
+      ],
+      "stage_durations": [
+        1.513
+      ],
+      "start_unix_ns": 1793990617567683033,
+      "end_unix_ns": 1793990619175310064,
+      "start_ros_ns": 1793990617567676943,
+      "end_ros_ns": 1793990619175299613,
+      "time_basis": "source_clock",
+      "clock_domain": "ros+system",
+      "cycle_id": "deploy_acd92bb0b3f3:target_2",
+      "scene_epoch": 1
+    },
+    {
+      "target_id": "target_1",
+      "outcome": 0,
+      "reason": "周期完成；tool.enabled=false 或未宣称采摘成功",
+      "quality_score": 0.0,
+      "elapsed_s": 18.41,
+      "completion_level": 6,
+      "stage_names": [
+        "finalize",
+        "approach_insert",
+        "reconfirm",
+        "tool",
+        "retreat"
+      ],
+      "stage_durations": [
+        0.431,
+        8.978,
+        0.2,
+        0.0,
+        8.67
+      ],
+      "start_unix_ns": 1793990621654463505,
+      "end_unix_ns": 1793990640070290189,
+      "start_ros_ns": 1793990621654457855,
+      "end_ros_ns": 1793990640070277818,
+      "time_basis": "source_clock",
+      "clock_domain": "ros+system",
+      "cycle_id": "deploy_acd92bb0b3f3:target_1",
+      "scene_epoch": 1
+    }
+  ],
+  "recordings": [
+    {
+      "bag": "/workspace/runs/clean_validation/verification_20261106T184137Z/readonly_mock/records/session_20261106_184224/bag",
+      "messages": 14868,
+      "passed": true
+    },
+    {
+      "bag": "/workspace/runs/clean_validation/verification_20261106T184137Z/frozen_grasp/records/session_20261106_184327/bag",
+      "messages": 9848,
+      "passed": true
+    }
+  ],
+  "all_attempt_recordings": [
+    {
+      "bag": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification/frozen_grasp/records/session_20261106_183726/bag",
+      "messages": 26956,
+      "expected": 26956,
+      "passed": true
+    },
+    {
+      "bag": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification/readonly_mock/records/session_20261106_183614/bag",
+      "messages": 16668,
+      "expected": 16668,
+      "passed": true
+    },
+    {
+      "bag": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification_20261106T184137Z/frozen_grasp/records/session_20261106_184327/bag",
+      "messages": 9848,
+      "expected": 9848,
+      "passed": true
+    },
+    {
+      "bag": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification_20261106T184137Z/readonly_mock/records/session_20261106_184224/bag",
+      "messages": 14868,
+      "expected": 14868,
+      "passed": true
+    }
+  ],
+  "source_audit": {
+    "files_checked": 2365,
+    "modified_existing_source_files": [],
+    "missing_files": [],
+    "readonly_driver_sources_modified": false
+  },
+  "final_process_audit": {
+    "ros_processes": [],
+    "ports_listening": {
+      "8090": false,
+      "9090": false
+    },
+    "passed": true
+  },
+  "script_checks": {
+    "flake8": 0,
+    "pep257": 0,
+    "bash_syntax": 0,
+    "node_syntax": 0
+  },
+  "installer_sha256": {
+    "validate_clean.py": "e7272101a0349932179f3a5b1740c441fc32db8dd76bb3f2b6d80f3331109b56",
+    "probe_websocket.js": "7951c72e425ac9b82175f4356db1d424e93de58e07282c1dc7643f2e057dd367",
+    "peach-matplotlib-nspkg.pth": "8ea8c3b105cfc299f6a41d33d4a6682959adcc318e614badcf846212279ba339",
+    "deploy.sh": "c12475d891ba6e214dea7417601975204f8aeace1a8cba9f50c8240061de3bbf",
+    "bootstrap_ubuntu.sh": "c2eca5a67cf074d6ba159362aa4ce801a66d6d8e23d944fa04ea95dc1ed8f894",
+    "verify_mock.py": "7912a9a60e73323c21f2e5f521e915a43874e306e8f36e2a141710c38d1534e1",
+    "env.bash": "ce6dc81e3ed24e4d694f814b28955c14bb4b5ed78b8356aa89ecb5dd5d574eb5",
+    "README.md": "830d813157c0e1a17871d8377f7eda04aa499ec8a1fdc36d0298341180dbd16e",
+    "verify.sh": "539975d221648718f7cf73933ebb26a3dfa82849db317d1f4e132111615eecdf"
+  },
+  "corrected_findings": [
+    "Bootstrap minimal images without CA through GPG-verified apt; enable retries and explicit mirrors.",
+    "Emulate package ownership for the single mapped UID with FAKEROOTDONTTRYCHOWN=1.",
+    "Use repeated rosdep dependency-type options and preserve stage histories.",
+    "Pin setuptools 78.1.0 for torch>=77.0.3 and colcon<80 compatibility.",
+    "Install vendor CMake omissions: camera_info_manager, image_transport, image_publisher, pcl_conversions, tf2_sensor_msgs.",
+    "Install configured Pilz/STOMP planners and verify PlanningScene service readiness.",
+    "Install CJK fonts and check font coverage before browser validation.",
+    "Check active listeners rather than mistaking TCP TIME_WAIT for an occupied port."
+  ],
+  "limits": [
+    "Single-target L6 dry run, tool disabled; fixture cancels after success; another target rejected by geometry gate.",
+    "No real arm/camera/serial IO, SetIO, true cutting, Gazebo or long soak acceptance.",
+    "Legacy IVG dashboard runtime still lacks ros_web_link/shared JS; not validated.",
+    "Package lint results from the preceding run remain separate: 7 readonly-driver lint checks fail and 70 cppcheck cases skip; this run checked the new deployment scripts."
+  ],
+  "evidence": {
+    "metadata": "/home/wjz/peach_robot/clean_room_20261107/clean_room.json",
+    "automatic_process_document": "/home/wjz/peach_robot/clean_room_20261107/process.md",
+    "curated_process_document": "/home/wjz/peach_robot/aubo_e5_jazzy_ws/docs/deployment-validation-20261107.md",
+    "verification": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification_20261106T184137Z/verification.json",
+    "deployment_output": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/deployment_20261106T184137Z"
+  },
+  "deployment_kit": {
+    "archive": "/home/wjz/peach_robot/peach-deployment-kit-20261107.tar.gz",
+    "bytes": 34321,
+    "sha256": "5a57228a648e9d18121bbc1ee8da20ffb08d2d53ed36b997017cb58de605ae69",
+    "members": 15,
+    "manifest_entries": 13,
+    "content_verification": true
+  }
+}

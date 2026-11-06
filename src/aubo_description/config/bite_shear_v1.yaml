@@ -1,0 +1,56 @@
+# 咬合式剪切手档案（bite_shear_v1）。
+# 双刀口对夹剪断果柄；喉道导轨（220mm）引导果枝进入，开口朝法兰 +Y（Rx(−90°)，果侧进枝）。
+# TCP=刀口区设计参考点 (0, 30.24, 165.5) mm（总装系测量核定：ΔY 30.24/ΔZ 165.5/
+# 距离 168.24，2026-09-28 用户核定）。改几何只改本文件与
+# urdf/components/tcp_bite_shear_v1.xacro。
+# 本档案由 peach_harvester/peach_harvester/vision/tool_profiles.py 在 launch 期装载注入。
+profile_id: bite_shear_v1
+calibration_status: cad_reference_point
+source: "STEP 总装 audo-i5机器人总装-咬合式剪切手.STEP；TCP=总装测量核定刀口区参考点"
+frames:
+  parent: wrist3_Link
+  # 原点 = 刀口区参考点（总装测量）；rpy Rx(−90°) → TCP Z // 法兰 +Y（开口，果侧进枝）
+  tool_axis: {xyz: [0.0, 0.03024, 0.1655], rpy: [-1.5708, 0.0, 0.0]}
+  cutting_plane: {xyz: [0.0, 0.0, 0.0], rpy: [0.0, 0.0, 0.0]}
+  tcp: {xyz: [0.0, 0.0, 0.0], rpy: [0.0, 0.0, 0.0]}
+  # 进枝口即 TCP（刀区前方）
+  sleeve_mouth: {xyz: [0.0, 0.0, 0.0], rpy: [0.0, 0.0, 0.0]}
+geometry_m:
+  # D_inner = 喉道功能张口（套入径向预算入口）。2026-09-30 用户裁定：几何权威在
+  # URDF/机械设计（机械部分会设计好），档案参数不得作为拦测试的约束；CAD 网格是
+  # 闭合单姿态导出、量不出开口，故按设计意图登记 104mm 级（与 tool_budget.py 历史默认
+  # 同级，标准 0.06 袋径向余量 +5.4mm）。机械定型后按实测核回本值。
+  D_inner: 0.104
+  D_outer: 0.180
+  L_insert: 0.030
+  # TCP（y=+30.24）到刀口区中心（y≈−7）的轴向距离
+  L_blade: 0.037
+  # 机械档案字段（套袋时代沿用口径，剪切手待标定，先保守登记）
+  entry_d_tool: 0.030
+  entry_d_s: 0.040
+  clearance_min: 0.005
+  margin_neck: 0.015
+  wall_clearance: 0.002
+  blade_thickness: 0.015
+  blade_capture_half_width: 0.008
+  fruit_safety_clearance: 0.012
+  axial_safety_margin: 0.004
+  # ①层果实胶囊审查的保守包络：TCP 到喉道末端（y=−229.5）全长 0.26；半径取挡板/刀架半宽
+  body_length: 0.260
+  body_radius: 0.090
+error_m:
+  tool_runout95: 0.001
+  tcp_calibration_error95: 0.005
+  hand_eye_error95: 0.003
+  bag_deformation_margin95: 0.002
+  blade_plane_calibration_error95: 0.003
+  robot_axial_error95: 0.002
+  target_motion95: 0.003
+io:
+  fun: 3
+  pin: 0
+  close_state: 1.0
+  pulse: false
+  feedback_timeout_s: 1.5
+  notes: "SetIO ACK 只算 CUT_COMMAND_ACCEPTED，不能单独确认切断；BST-YF 推杆通道待真机核"
+version: "1.2"

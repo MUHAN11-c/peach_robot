@@ -1,0 +1,1454 @@
+// 功能：节点侧运动入口与 MoveIt 运动接口实现（拍照位原路返程或 PTP、观察 LIN、
+// 预览接近/接触服务、tip/camera 规划执行、TF 查询）。真实下发前过注入的安全门
+// （TRANSIT 级底座；CONTACT/TOOL 级在阶段函数与 GraspTask 门加查）。
+#include "peach_arm/motion.hpp"
+#include "execution_guard.hpp"
+#include "trajectory_audit.hpp"
+
+#include <charconv>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstddef>
+#include <future>
+#include <iomanip>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <moveit/robot_state/conversions.hpp>
+#include <moveit/robot_state/robot_state.hpp>
+#include <moveit/planning_scene/planning_scene.hpp>
+#include <moveit_msgs/srv/get_planning_scene.hpp>
+#include <tf2_eigen/tf2_eigen.hpp>
+#include <tf2/exceptions.h>
+#include <tf2/utils.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <moveit/move_group_interface/move_group_interface.hpp>
+#include <moveit/robot_state/cartesian_interpolator.hpp>
+#include <moveit/utils/moveit_error_code.hpp>
+
+#include "peach_arm/manipulation_skills_node.hpp"
+#include "peach_arm/eigen_conversions.hpp"
+#include "peach_arm/grasp_geometry.hpp"
+#include "peach_arm/trajectory_guard.hpp"
+
+using namespace std::chrono_literals;
+
+namespace peach_arm
+{
+namespace
+{
+
+// SELECT 套入段：从预抓取 IK 解沿轴 interpolate 到套入终点，分数对齐接触 LIN。
+double sleeve_cartesian_fraction(
+  const moveit::core::RobotState & start,
+  const moveit::core::JointModelGroup * group,
+  const moveit::core::LinkModel * link,
+  const Eigen::Isometry3d & sleeve,
+  double step_m,
+  double precision_m)
+{
+  if (group == nullptr || link == nullptr) {
+    return 0.0;
+  }
+  std::vector<moveit::core::RobotStatePtr> traj;
+  const moveit::core::MaxEEFStep max_step(step_m);
+  moveit::core::CartesianPrecision precision;
+  precision.translational = precision_m > 0.0 ? precision_m : 0.001;
+  // Isometry 重载的 options 无默认实参；空回调 = 只问沿轴 IK，不装配 MTC。
+  const auto fraction = moveit::core::CartesianInterpolator::computeCartesianPath(
+    &start, group, traj, link, sleeve, true, max_step, precision,
+    moveit::core::GroupStateValidityCallbackFn(),
+    kinematics::KinematicsQueryOptions());
+  return fraction.value;
+}
+
+struct SleeveRollProbe
+{
+  bool pregrasp_ik{false};
+  bool sleeve_ik{false};
+  double fraction{-1.0};
+};
+
+Eigen::Isometry3d pose_with_tool_z_roll(
+  const Eigen::Isometry3d & pose, double roll_rad)
+{
+  if (std::abs(roll_rad) < 1.0e-12) {
+    return pose;
+  }
+  Eigen::Isometry3d out = pose;
+  out.linear() = pose.linear() * Eigen::AngleAxisd(roll_rad, Eigen::Vector3d::UnitZ());
+  return out;
+}
+
+SleeveRollProbe probe_sleeve_roll(
+  const moveit::core::RobotState & seed,
+  const moveit::core::JointModelGroup * group,
+  const moveit::core::LinkModel * tip_link,
+  const std::string & tip_name,
+  const Eigen::Isometry3d & pregrasp_pose,
+  const Eigen::Isometry3d & sleeve_pose,
+  double roll_rad,
+  double ik_timeout_s,
+  double step_m,
+  double precision_m)
+{
+  SleeveRollProbe out;
+  if (group == nullptr) {
+    return out;
+  }
+  const Eigen::Isometry3d rolled = pose_with_tool_z_roll(pregrasp_pose, roll_rad);
+  moveit::core::RobotState probe = seed;
+  if (!probe.setFromIK(group, rolled, tip_name, ik_timeout_s)) {
+    return out;
+  }
+  out.pregrasp_ik = true;
+  Eigen::Isometry3d sleeve = sleeve_pose;
+  const Eigen::Isometry3d pre_tcp = probe.getGlobalLinkTransform(tip_name);
+  if (pre_tcp.matrix().allFinite()) {
+    sleeve.linear() = pre_tcp.linear();
+  }
+  moveit::core::RobotState sleeve_probe = seed;
+  out.sleeve_ik = sleeve_probe.setFromIK(group, sleeve, tip_name, ik_timeout_s);
+  if (tip_link != nullptr) {
+    out.fraction = sleeve_cartesian_fraction(
+      probe, group, tip_link, sleeve, step_m, precision_m);
+  }
+  return out;
+}
+
+}  // namespace
+
+void ManipulationSkillsNode::onRobotStatus(
+  const aubo_msgs::msg::RobotStatus::SharedPtr message)
+{
+  std::lock_guard<std::mutex> lock(robot_mutex_);
+  robot_status_ = *message;
+  robot_status_received_ = now();
+  robot_status_mono_s_ = std::chrono::duration<double>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+  robot_status_valid_ = true;
+}
+
+void ManipulationSkillsNode::onIoState(
+  const aubo_msgs::msg::IOState::SharedPtr message)
+{
+  // 工具 DI pin0（刀闭合电平）→沿检测→三轴投影；成功 ACK 与发送后新沿
+  // 到齐后，由 ToolActuator 确认本事务。首帧或持续高电平都不是新沿。
+  bool pin_level = false;
+  bool pin_found = false;
+  for (const auto & d : message->tool_io_states) {
+    if (d.pin == 0 && d.flag) {
+      pin_level = d.state;
+      pin_found = true;
+      break;
+    }
+  }
+  if (!pin_found) {
+    return;  // 本帧无工具 DI（仿真早期/驱动未起）
+  }
+  int64_t stamp_ns = 0;
+  const auto end = message->stamp.data() + message->stamp.size();
+  const auto parsed = std::from_chars(message->stamp.data(), end, stamp_ns);
+  if (parsed.ec != std::errc{} || parsed.ptr != end || stamp_ns <= 0) {return;}
+  // 驱动 stamp 是本机 controller update 的 ROS 纳秒时间，与 now 同钟。
+  // 未来样本不得确认闭合，也不得推进状态机的单调戳基准。
+  if (stamp_ns > now().nanoseconds()) {return;}
+  std::string edge;
+  if (tool_actuator_.ingestToolDi(pin_level, edge, stamp_ns)) {
+    RCLCPP_INFO(get_logger(), "工具 DI 沿：%s", edge.c_str());
+    publishToolState(edge);
+  }
+}
+
+void ManipulationSkillsNode::publishToolState(const std::string & evidence)
+{
+  if (!tool_state_pub_) {
+    return;
+  }
+  peach_interfaces::msg::ToolState msg;
+  msg.header.stamp = now();
+  msg.header.frame_id = params_.frames.tip;
+  const auto axes = tool_actuator_.axes();
+  msg.blade_state = axes.blade;
+  msg.retention_state = axes.retention;
+  msg.payload_state = axes.payload;
+  msg.evidence_source = evidence;
+  msg.fault_code = axes.fault_code;
+  tool_state_pub_->publish(msg);
+}
+
+// 果实胶囊（①层）：感知直径+膨胀；无效直径回退保守半径并告警。
+FruitCapsule ManipulationSkillsNode::fruitCapsuleFor(
+  const CachedRefined & refined) const
+{
+  if (!(refined.bag_diameter_upper_m > 0.0)) {
+    RCLCPP_WARN(
+      get_logger(),
+      "感知果实直径无效(%.3f)：果实胶囊回退保守半径 %.3fm（目标 %s）",
+      refined.bag_diameter_upper_m,
+      params_.moveit.mtc_approach_keepout_radius_m, refined.id.c_str());
+  }
+  return fruitCapsuleFrom(
+    refined.bottom, refined.neck, refined.axis, refined.bag_diameter_upper_m,
+    params_.grasp.fruit_inflation_m, params_.moveit.mtc_approach_keepout_radius_m,
+    params_.moveit.mtc_approach_keepout_axial_m > 1.0e-6);
+}
+
+// ④层接触止损接线：joint_status 电流环形缓存 + guarded 段 timer 评估。
+// enabled=false（默认）时只缓存不判定；触发即取消当前执行并置旗标，
+// 阶段函数在段后判旗标给失败文案。阈值须真机受控试验标定后启用。
+void ManipulationSkillsNode::onJointStatus(
+  const aubo_msgs::msg::JointStatus::SharedPtr message)
+{
+  if (message->current.size() < 6U) {
+    return;
+  }
+  CurrentSample sample;
+  sample.t = now().seconds();
+  for (std::size_t j = 0; j < 6U; ++j) {
+    sample.current[j] = message->current[j];
+  }
+  std::lock_guard<std::mutex> lock(joint_current_mutex_);
+  joint_current_samples_.push(sample);
+}
+
+void ManipulationSkillsNode::startContactGuard()
+{
+  contact_abort_suspected_.store(false);
+  if (!contact_detect_config_.enabled) {
+    return;
+  }
+  std::vector<CurrentSample> baseline;
+  {
+    std::lock_guard<std::mutex> lock(joint_current_mutex_);
+    const double now_s = now().seconds();
+    for (const auto & sample : joint_current_samples_.oldestToNewest()) {
+      if (now_s - sample.t <= contact_detect_config_.baseline_s) {
+        baseline.push_back(sample);
+      }
+    }
+  }
+  std::lock_guard<std::mutex> guard_lock(contact_guard_mutex_);
+  contact_monitor_ = std::make_unique<ContactMonitor>(contact_detect_config_);
+  contact_monitor_->start(baseline);
+  contact_guard_timer_ = this->create_wall_timer(
+    std::chrono::milliseconds(50),
+    [this, weak = weak_from_this()]() {
+      const auto keep_alive = weak.lock();
+      if (!keep_alive) {return;}
+      CurrentSample latest;
+      {
+        std::lock_guard<std::mutex> lock(joint_current_mutex_);
+        if (joint_current_samples_.empty()) {
+          return;
+        }
+        latest = joint_current_samples_.back();
+      }
+      ContactReport report;
+      {
+        std::lock_guard<std::mutex> guard_lock(contact_guard_mutex_);
+        if (!contact_monitor_) {return;}
+        report = contact_monitor_->update(latest);
+      }
+      // 停轨可能等待其他工作体；不得持 monitor 锁调用取消级联。
+      if (report.verdict == ContactVerdict::SUSPECTED_HARD) {
+        RCLCPP_ERROR(
+          get_logger(),
+          "疑似硬接触（%s，腕轴 %zu，偏差 %.2f）：取消当前执行",
+          report.reason.c_str(), report.joint_index,
+          report.max_wrist_deviation);
+        contact_abort_suspected_.store(true);
+        requestCancelAll("疑似硬接触止损");
+      }
+    });
+}
+
+void ManipulationSkillsNode::stopContactGuard()
+{
+  std::lock_guard<std::mutex> guard_lock(contact_guard_mutex_);
+  contact_guard_timer_.reset();
+  contact_monitor_.reset();
+}
+
+bool ManipulationSkillsNode::contactAbortSuspected() const
+{
+  return contact_abort_suspected_.load();
+}
+
+double ManipulationSkillsNode::insertionTravel(const CachedRefined & refined) const
+{
+  // TCP 是工具圆柱前端面圆心，也就是物理剪切点。精化给出入口到剪切
+  // 参考的行程时优先采用；否则按袋颈减颈部余量回退。
+  double travel = refined.suggested_travel_m;
+  if (!std::isfinite(travel) || travel < 0.0 || travel > 1.0e-6) {
+    return validatedCutTravel(travel, params_.grasp.minimum_travel_m,
+      params_.grasp.maximum_travel_m).value_or(0.0);
+  }
+  const bool has_refined_geometry =
+    refined.entry.allFinite() &&
+    refined.bottom.allFinite() &&
+    refined.neck.allFinite() &&
+    refined.axis.allFinite() && refined.axis.norm() > 1.0e-9 &&
+    (refined.neck - refined.bottom).norm() > 1.0e-6;
+  if (travel <= 1.0e-6 && has_refined_geometry) {
+    const Eigen::Vector3d axis = refined.axis.normalized();
+    travel = (refined.neck - refined.entry).dot(axis) - params_.grasp.neck_margin_m;
+  }
+  return std::clamp(travel, params_.grasp.minimum_travel_m, params_.grasp.maximum_travel_m);
+}
+
+bool ManipulationSkillsNode::safetyReady(std::string & reason)
+{
+  RobotStatusSample sample;
+  double mono_age = 0.0;
+  {
+    std::lock_guard<std::mutex> lock(robot_mutex_);
+    sample.received = robot_status_valid_;
+    sample.received_s = robot_status_received_.seconds();
+    sample.e_stopped = robot_status_.e_stopped != 0;
+    sample.in_error = robot_status_.in_error != 0;
+    sample.drives_powered = robot_status_.drives_powered != 0;
+    sample.motion_possible = robot_status_.motion_possible != 0;
+    const double now_mono = std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (robot_status_mono_s_ > 0.0) {
+      mono_age = now_mono - robot_status_mono_s_;
+    }
+  }
+  if (sample.received && mono_age > robot_status_contract_timeout_s_) {
+    reason = "robot_status_stale";
+    return false;
+  }
+  return safety_gate_->robotReady(sample, reason);
+}
+
+bool ManipulationSkillsNode::cycleTargetReady(
+  const std::string & target_id, std::string & reason)
+{
+  // 安全门样本按周期生效目标取数（同 stages.cpp cycleTargetSnapshot 的
+  // 分流理由）：钉入 ID 的周期取 goal 目标的锁定集锚点样本（目标门判其
+  // 身份/有效性/新鲜度），其余周期取感知 selected 样本。
+  const TargetGateSample sample =
+    !target_id.empty() ?
+    cache_.lockedTargetGateSample(target_id) : cache_.targetGateSample();
+  return safety_gate_->targetReady(sample, target_id, reason);
+}
+
+bool ManipulationSkillsNode::commandToolOpen()
+{
+  // 批次3（G3）：收集位释放。授权矩阵同 close（TOOL 级）——开刀也是
+  // 危险动作（松开=掉果风险），不降档。
+  // 授权凭据取阶段门通过后的真实周期快照（tool_authority_ctx_）：
+  // 裸构造 CycleContext 的 pregrasp_verified 恒 false，会恒拒死剪切链
+  //（2026-09-24 审计 F1）。目标不符事务仍拒绝。
+  CycleContext probe = tool_authority_ctx_;
+  probe.target_id = tool_actuator_.context().target_id;
+  std::string why;
+  StageDenial denial = StageDenial::DENIED;
+  if (!tool_io_client_->wait_for_service(
+      std::chrono::duration<double>(params_.timeouts.service_s)))
+  {
+    setState(CycleState::FAILED, "末端工具 set_io 服务不可用");
+    return false;
+  }
+  auto request = std::make_shared<aubo_msgs::srv::SetIO::Request>();
+  request->fun = static_cast<int8_t>(params_.tool.io_fun);
+  request->pin = static_cast<int8_t>(params_.tool.io_pin);
+  request->state = static_cast<float>(
+    params_.tool.close_state > 0.5f ? 0.0f : 1.0f);
+  if (!authorizeStage(probe, MotionStage::TOOL, why, denial)) {
+    setState(CycleState::FAILED, "工具开刀被拒绝: " + why, probe.target_id);
+    return false;
+  }
+  auto future = tool_io_client_->async_send_request(request);
+  if (future.wait_for(std::chrono::duration<double>(
+      params_.timeouts.service_s)) != std::future_status::ready ||
+    !future.get()->success)
+  {
+    setState(CycleState::FAILED, "末端工具开刀 SetIO 失败");
+    return false;
+  }
+  RCLCPP_INFO(get_logger(), "末端工具开刀（收集位释放）受理");
+  return true;
+}
+
+bool ManipulationSkillsNode::commandToolClose(std::string & reason)
+{
+  // 工具 IO 收敛到授权矩阵 TOOL 级（Active ∧ robotReady ∧ !cancel ∧
+  // execution ∧ grasp ∧ GraspDecision 复检 ∧ tool.enabled）。周期身份取自
+  // ToolActuator 当前事务（arm 在 sendCut 前已写入周期 goal 目标）。
+  // 授权凭据取阶段门通过后的真实周期快照（2026-09-24 审计 F1 同修）。
+  CycleContext probe = tool_authority_ctx_;
+  probe.target_id = tool_actuator_.context().target_id;
+  std::string why;
+  StageDenial denial = StageDenial::DENIED;
+  if (!tool_io_client_->wait_for_service(
+      std::chrono::duration<double>(params_.timeouts.service_s)))
+  {
+    reason = "set_io_unavailable";
+    setState(CycleState::FAILED, "末端工具 set_io 服务不可用");
+    return false;
+  }
+  auto request = std::make_shared<aubo_msgs::srv::SetIO::Request>();
+  request->fun = static_cast<int8_t>(params_.tool.io_fun);
+  request->pin = static_cast<int8_t>(params_.tool.io_pin);
+  request->state = static_cast<float>(params_.tool.close_state);
+  if (!authorizeStage(probe, MotionStage::TOOL, why, denial)) {
+    reason = why;
+    setState(CycleState::FAILED, "工具 IO 被拒绝: " + why, probe.target_id);
+    return false;
+  }
+  const auto dispatch_stamp_ns = now().nanoseconds();
+  if (dispatch_stamp_ns <= 0) {
+    reason = "tool_clock_unavailable";
+    return false;
+  }
+  return tool_actuator_.sendCut(
+    dispatch_stamp_ns, [this, &request](std::string & failure) {
+      auto future = tool_io_client_->async_send_request(request);
+      if (future.wait_for(std::chrono::duration<double>(params_.timeouts.service_s)) !=
+      std::future_status::ready || !future.get()->success)
+      {
+        failure = "set_io_failed";
+        return false;
+      }
+      return true;
+    }, reason);
+}
+
+void ManipulationSkillsNode::onPreviewApproachInsert(
+  const Trigger::Request::SharedPtr, Trigger::Response::SharedPtr response)
+{
+  const ScopedTimer timer(get_logger(), "preview_approach_insert", &callback_timing_);
+  previewContact(false, response);
+}
+
+void ManipulationSkillsNode::onPreviewFullContact(
+  const Trigger::Request::SharedPtr, Trigger::Response::SharedPtr response)
+{
+  const ScopedTimer timer(get_logger(), "preview_full_contact", &callback_timing_);
+  previewContact(true, response);
+}
+
+void ManipulationSkillsNode::previewContact(
+  bool include_retreat, Trigger::Response::SharedPtr response, bool from_action)
+{
+  std::unique_lock<MotionAdmission> claim(motion_admission_, std::defer_lock);
+  if (!from_action && !claim.try_lock()) {
+    response->success = false;
+    response->message = "运动请求或策略重载占用中";
+    return;
+  }
+  // 接触轨迹预览是运动类入口（A8）：即便只规划不执行，也非 Active 不放行。
+  std::string motion_reason;
+  if (!motionOutputAllowed(motion_reason)) {
+    response->success = false;
+    response->message = motion_reason;
+    return;
+  }
+  bool expected = false;
+  if (!running_.compare_exchange_strong(expected, true)) {
+    response->success = false;
+    response->message = "已有规划或执行周期正在运行";
+    return;
+  }
+  // 预览周期同样在每周期开始时重置终局分级。
+  pending_outcome_.store(ExecuteTarget::Result::FAILED);
+  // 预览周期（含 action PREVIEW 模式）同样计时：approach_insert 段覆盖
+  // PREVIEW_CONTACT_PLANNING（见 cycle_support.hpp 阶段投影注释）。
+  startCycleTiming();
+  const auto finish = [this, &response, &claim](
+    bool success, CycleState state, const std::string & message)
+    {
+      // 先落终态再解除 running，保证 action 侧读到的一定是终态而非中间态。
+      setState(state, message);
+      running_.store(false);
+      if (claim.owns_lock()) {claim.unlock();}
+      publishState();
+      response->success = success;
+      response->message = message;
+    };
+
+  const GateResult gate = quality_gate_->readyToPreviewContact(qualitySnapshot());
+  const auto target = targetSnapshot();
+  const auto refined = refinedSnapshot();
+  if (!gate.allowed) {
+    finish(false, CycleState::PREVIEW_FAILED, "接触轨迹预览质量门失败: " + gate.reason);
+    return;
+  }
+  if (!target || !refined || target->id != refined->id ||
+    graspDecisionTargetSnapshot() != target->id)
+  {
+    finish(false, CycleState::PREVIEW_FAILED, "接触轨迹预览目标 ID 或精化几何不一致");
+    return;
+  }
+
+  // preview 隔离（重构协议阶段 B）：预览不是周期，绝不得创建/读写周期上下文
+  // （周期身份钉在 ctx，由 action 受理/stagePrepareCycle 管理）——否则预览过
+  // 的目标 ID 会污染后续手动周期：stagePrepareCycle 的 goal 钉死校验会把
+  // "新 selected ≠ 预览残留 ID"误判为目标身份变更而失败。本函数内一律用局部
+  // target/refined。
+  Eigen::Isometry3d entry_tip_pose;
+  double travel = 0.0;
+  std::string entry_error;
+  if (!contactEntryGeometry(
+      *refined, target->initial_pose, entry_tip_pose, travel, entry_error))
+  {
+    finish(false, CycleState::PREVIEW_FAILED, entry_error);
+    return;
+  }
+
+  setState(
+    CycleState::PREVIEW_CONTACT_PLANNING,
+    include_retreat ? "MTC 只规划：到轨迹净空点、单条轴向套入、同轴撤离" :
+    "MTC 只规划：到轨迹净空点、单条轴向套入");
+  const FruitCapsule fruit = fruitCapsuleFor(*refined);
+  grasp_task_->setContactAcm(target->id, ContactAcmStage::Pregrasp);
+  const GraspTaskResult result = include_retreat ?
+    grasp_task_->previewFullContact(entry_tip_pose, refined->axis, travel,
+      fruit) :
+    grasp_task_->approachAndInsert(entry_tip_pose, refined->axis, travel,
+      fruit);
+  if (!result.success) {
+    finish(false, CycleState::PREVIEW_FAILED, "MTC 接触轨迹预览失败: " + result.reason);
+    return;
+  }
+  finish(
+    true, CycleState::PREVIEW_READY,
+    include_retreat ?
+    "完整接触轨迹已发布到 RViz；仅规划，未发送任何运动" :
+    "入口与插入轨迹已发布到 RViz；仅规划，未发送任何运动");
+}
+
+// 选果级 TCP IK + 套入沿轴笛卡尔预检：请求当入口，换成与 MovePregrasp 同一停位再 setFromIK
+// （后撤 mtc_approach_along_axis_m + alignFrameZ 保留当前 TCP 滚转）。
+// require_sleeve 时再检套入终点 IK，并用 CartesianInterpolator 从预抓取解
+// 沿轴插到终点（阈值 mtc_cartesian_min_fraction）。只答能否，不动臂。
+void ManipulationSkillsNode::onCheckReachability(
+  const CheckReachability::Request::SharedPtr request,
+  CheckReachability::Response::SharedPtr response)
+{
+  const ScopedTimer timer(get_logger(), "check_reachability", &callback_timing_);
+  // 纯 IK 也读取可重载策略与 MoveGroup；占同一席位，避免改参/cleanup 并发释放。
+  // 仅检查生命周期及占用，不要求 execution 使能，也不调用任何执行授权。
+  std::unique_lock<MotionAdmission> claim(motion_admission_, std::try_to_lock);
+  if (!claim.owns_lock() || !motion_output_permitted_.load()) {
+    const std::string code = claim.owns_lock() ? "node_inactive" : "motion_policy_busy";
+    response->reachable.assign(request->tcp_poses.size(), false);
+    response->error_codes.assign(request->tcp_poses.size(), code);
+    response->message = code;
+    return;
+  }
+  evaluateReachability(request, response);
+}
+
+void ManipulationSkillsNode::evaluateReachability(
+  const CheckReachability::Request::SharedPtr request,
+  CheckReachability::Response::SharedPtr response)
+{
+  response->reachable.resize(request->tcp_poses.size(), false);
+  response->error_codes.resize(request->tcp_poses.size(), "");
+  if (!move_group_) {
+    response->message = "moveit_unavailable";
+    for (auto & code : response->error_codes) {
+      code = "moveit_unavailable";
+    }
+    return;
+  }
+  const auto robot_model = move_group_->getRobotModel();
+  const auto group = robot_model->getJointModelGroup(params_.moveit.planning_group);
+  if (group == nullptr) {
+    response->message = "unknown_planning_group";
+    for (auto & code : response->error_codes) {
+      code = "invalid_group";
+    }
+    return;
+  }
+  const auto current_state = move_group_->getCurrentState();
+  if (!current_state) {
+    // 状态监视器断流时 getCurrentState 为空（审查 P1-1 同源存量）
+    for (auto & code : response->error_codes) {
+      code = "robot_state_unavailable";
+    }
+    return;
+  }
+  moveit::core::RobotState seed = *current_state;
+  Eigen::Isometry3d current_tip = Eigen::Isometry3d::Identity();
+  bool have_current_tip = false;
+  if (robot_model->hasLinkModel(params_.frames.tip)) {
+    current_tip = seed.getGlobalLinkTransform(params_.frames.tip);
+    have_current_tip = current_tip.matrix().allFinite();
+  }
+  const double ik_timeout_s = std::isfinite(request->timeout_s) && request->timeout_s > 0.0 ?
+    std::min(request->timeout_s, kStagingIkSolveTimeoutS) : kQuickIkProbeTimeoutS;
+  for (std::size_t i = 0; i < request->tcp_poses.size(); ++i) {
+    const auto & stamped = request->tcp_poses[i];
+    geometry_msgs::msg::Pose pose = stamped.pose;
+    // 非模型系先经 TF 转换（一般请求即 base_link==模型系）
+    if (!stamped.header.frame_id.empty() &&
+      stamped.header.frame_id != robot_model->getModelFrame())
+    {
+      try {
+        auto tf = tf_buffer_.lookupTransform(
+          robot_model->getModelFrame(), stamped.header.frame_id,
+          tf2::TimePointZero);
+        tf2::doTransform(pose, pose, tf);
+      } catch (const tf2::TransformException & error) {
+        response->error_codes[i] = "invalid_frame";
+        continue;
+      }
+    }
+    Eigen::Isometry3d entry;
+    tf2::fromMsg(pose, entry);
+    const auto geometry = trajectoryApproachGeometry(
+      entry, entry.linear().col(2), params_.moveit.mtc_approach_along_axis_m,
+      params_.moveit.approach_clearance_m);
+    if (!geometry) {
+      response->error_codes[i] = "invalid_approach_geometry";
+      continue;
+    }
+    Eigen::Isometry3d target = geometry->transfer;
+    if (have_current_tip) {
+      target.linear() = alignFrameZ(current_tip.linear(), entry.linear().col(2));
+    }
+    // 快速可行性 IK：当前种子 + 单次有界超时——单源常量在
+    // motion.hpp（kQuickIkProbeTimeoutS；快速预检专用
+    // 深搜档 kStagingIkSolveTimeoutS 区分，选果整链须早退）。
+    const auto try_ik =
+      [&](const Eigen::Isometry3d & pose, moveit::core::RobotState * out) {
+        moveit::core::RobotState probe = seed;
+        if (probe.setFromIK(group, pose, params_.frames.tip, ik_timeout_s)) {
+          if (out != nullptr) {
+            *out = probe;
+          }
+          return true;
+        }
+        if (!have_current_tip) {
+          return false;
+        }
+        for (const double roll : toolRollsRad()) {
+          if (std::abs(roll) < 1.0e-12) {
+            continue;
+          }
+          Eigen::Isometry3d probe_pose = pose;
+          probe_pose.linear() = pose.linear() *
+            Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitZ());
+          probe = seed;
+          if (probe.setFromIK(
+              group, probe_pose, params_.frames.tip, ik_timeout_s))
+          {
+            if (out != nullptr) {
+              *out = probe;
+            }
+            return true;
+          }
+        }
+        return false;
+      };
+    // 预抓取停位：keep-roll 先行，失败才 ±15°/±30°/±45°（toolRollsRad）。
+    // require_sleeve 时不能停在第一组预抓取 IK：直线套入必须从该组关节
+    // 走满阈值，否则换下一档滚转（2026-10-16：0° 走 88%，+15° 走满）。
+    moveit::core::RobotState pregrasp_state = seed;
+    bool pregrasp_ok = false;
+    bool sleeve_ok = true;
+    bool cartesian_ok = true;
+    if (!request->require_sleeve) {
+      pregrasp_ok = try_ik(target, &pregrasp_state);
+    } else {
+      const double suggested =
+        (i < request->suggested_travel_m.size()) ?
+        request->suggested_travel_m[i] : 0.0;
+      const auto exact_travel = validatedCutTravel(
+        suggested, params_.grasp.minimum_travel_m, params_.grasp.maximum_travel_m);
+      if ((!std::isfinite(suggested) || suggested != 0.0) && !exact_travel) {
+        response->reachable[i] = false;
+        response->error_codes[i] = "cut_travel_out_of_range";
+        continue;
+      }
+      const double travel = exact_travel.value_or(clampInsertionTravel(
+        suggested, params_.grasp.minimum_travel_m, params_.grasp.maximum_travel_m));
+      Eigen::Matrix3d tip_R = entry.linear();
+      if (have_current_tip) {
+        tip_R = current_tip.linear();
+      }
+      const Eigen::Isometry3d sleeve =
+        sleeveFromEntryKeepRoll(entry, tip_R, travel);
+      const auto * tip_link = robot_model->hasLinkModel(params_.frames.tip) ?
+        robot_model->getLinkModel(params_.frames.tip) : nullptr;
+      sleeve_ok = false;
+      cartesian_ok = false;
+      double fraction = -1.0;
+      double chosen_roll = 0.0;
+      std::ostringstream rolls;
+      for (const double roll : toolRollsRad()) {
+        const int deg = static_cast<int>(std::lround(roll * 180.0 / EIGEN_PI));
+        const auto probe = probe_sleeve_roll(
+          seed, group, tip_link, params_.frames.tip, target, sleeve, roll,
+          ik_timeout_s, params_.moveit.mtc_cartesian_step_m,
+          params_.moveit.mtc_cartesian_precision_m);
+        if (!probe.pregrasp_ik) {
+          rolls << ' ' << deg << "deg=no_ik";
+          continue;
+        }
+        pregrasp_ok = true;
+        if (probe.sleeve_ik) {
+          sleeve_ok = true;
+        }
+        rolls << ' ' << deg << "deg=" << std::fixed << std::setprecision(3)
+              << probe.fraction;
+        const bool this_cartesian = probe.fraction + 1.0e-9 >=
+          params_.moveit.mtc_cartesian_min_fraction;
+        if (this_cartesian) {
+          sleeve_ok = true;
+          cartesian_ok = true;
+          fraction = probe.fraction;
+          chosen_roll = roll;
+          break;
+        }
+        if (probe.fraction > fraction) {
+          fraction = probe.fraction;
+        }
+      }
+      Eigen::Vector3d seed_p = Eigen::Vector3d::Zero();
+      if (have_current_tip) {
+        seed_p = current_tip.translation();
+      }
+      const Eigen::Vector3d pre_p = target.translation();
+      const Eigen::Vector3d sleeve_p = sleeve.translation();
+      RCLCPP_INFO(
+        contactLogger(),
+        "CheckReachability 套入直线预检 pregrasp_ik=%d sleeve_ik=%d "
+        "cartesian=%d fraction=%.3f roll=%.0fdeg threshold=%.2f travel=%.3fm "
+        "path=%.3fm seed=[%.3f %.3f %.3f] pre=[%.3f %.3f %.3f] "
+        "sleeve=[%.3f %.3f %.3f]",
+        static_cast<int>(pregrasp_ok), static_cast<int>(sleeve_ok),
+        static_cast<int>(cartesian_ok), fraction,
+        static_cast<double>(chosen_roll * 180.0 / EIGEN_PI),
+        params_.moveit.mtc_cartesian_min_fraction, travel,
+        (sleeve_p - pre_p).norm(),
+        seed_p.x(), seed_p.y(), seed_p.z(),
+        pre_p.x(), pre_p.y(), pre_p.z(),
+        sleeve_p.x(), sleeve_p.y(), sleeve_p.z());
+      if (!cartesian_ok) {
+        RCLCPP_WARN(
+          contactLogger(),
+          "CheckReachability 套入直线未走满 各滚转 fraction:%s",
+          rolls.str().c_str());
+      } else if (std::abs(chosen_roll) > 1.0e-6) {
+        RCLCPP_INFO(
+          contactLogger(),
+          "CheckReachability 套入直线改用刀口滚转 %.0f°（keep-roll 未走满）",
+          static_cast<double>(chosen_roll * 180.0 / EIGEN_PI));
+      }
+    }
+    const char * code = sleeveReachabilityCode(
+      pregrasp_ok, sleeve_ok, cartesian_ok);
+    response->reachable[i] = (code[0] == '\0');
+    response->error_codes[i] = code;
+    const double logged_travel =
+      (i < request->suggested_travel_m.size()) ?
+      request->suggested_travel_m[i] : 0.0;
+    RCLCPP_INFO(
+      contactLogger(),
+      "CheckReachability idx=%zu require_sleeve=%d travel=%.3fm "
+      "reachable=%s code=%s",
+      i, static_cast<int>(request->require_sleeve), logged_travel,
+      response->reachable[i] ? "true" : "false",
+      (code[0] == '\0') ? "ok" : code);
+  }
+}
+
+bool ManipulationSkillsNode::probeSleeveInsert(
+  double roll_rad, const Eigen::Isometry3d & entry, double travel_m,
+  double * fraction_out)
+{
+  if (fraction_out != nullptr) {
+    *fraction_out = -1.0;
+  }
+  if (travel_m <= 1.0e-6) {
+    return true;
+  }
+  if (!move_group_) {
+    return false;
+  }
+  const auto robot_model = move_group_->getRobotModel();
+  const auto group = robot_model->getJointModelGroup(params_.moveit.planning_group);
+  const auto current_state = move_group_->getCurrentState();
+  if (group == nullptr || !current_state) {
+    return false;
+  }
+  Eigen::Isometry3d current_tip = Eigen::Isometry3d::Identity();
+  bool have_current_tip = false;
+  if (robot_model->hasLinkModel(params_.frames.tip)) {
+    current_tip = current_state->getGlobalLinkTransform(params_.frames.tip);
+    have_current_tip = current_tip.matrix().allFinite();
+  }
+  const auto geometry = trajectoryApproachGeometry(
+    entry, entry.linear().col(2), params_.moveit.mtc_approach_along_axis_m,
+    params_.moveit.approach_clearance_m, travel_m);
+  if (!geometry) {
+    return false;
+  }
+  Eigen::Isometry3d pregrasp = geometry->transfer;
+  if (have_current_tip) {
+    pregrasp.linear() = alignFrameZ(current_tip.linear(), entry.linear().col(2));
+  }
+  Eigen::Matrix3d tip_R = entry.linear();
+  if (have_current_tip) {
+    tip_R = current_tip.linear();
+  }
+  const Eigen::Isometry3d sleeve = sleeveFromEntryKeepRoll(entry, tip_R, travel_m);
+  const auto * tip_link = robot_model->hasLinkModel(params_.frames.tip) ?
+    robot_model->getLinkModel(params_.frames.tip) : nullptr;
+  const auto probe = probe_sleeve_roll(
+    *current_state, group, tip_link, params_.frames.tip, pregrasp, sleeve,
+    roll_rad, kQuickIkProbeTimeoutS, params_.moveit.mtc_cartesian_step_m,
+    params_.moveit.mtc_cartesian_precision_m);
+  if (fraction_out != nullptr) {
+    *fraction_out = probe.fraction;
+  }
+  return probe.pregrasp_ik &&
+         probe.fraction + 1.0e-9 >= params_.moveit.mtc_cartesian_min_fraction;
+}
+
+// 全局拍照位姿：批次编排器在发现/复扫轮次开始前调用，把机械臂送到 SRDF
+// 命名状态（默认 global_photo_pose）。同步规划（execution 使能时含执行）。
+// A7 起三个长规划服务独占 planning_callback_group_；规划期间只组内排队。
+void ManipulationSkillsNode::onGoToPhotoPose(
+  const Trigger::Request::SharedPtr, Trigger::Response::SharedPtr response)
+{
+  goToPhotoPose(false, response);
+}
+
+void ManipulationSkillsNode::goToPhotoPose(
+  bool from_survey_action, Trigger::Response::SharedPtr response)
+{
+  const ScopedTimer timer(get_logger(), "go_to_photo_pose", &callback_timing_);
+  std::unique_lock<MotionAdmission> claim(motion_admission_, std::defer_lock);
+  if (!from_survey_action && !claim.try_lock()) {
+    response->success = false;
+    response->message = "运动请求或策略重载占用中";
+    return;
+  }
+  // 运动输出权限绑定 Active 态（A8）：非 Active 拒绝并给出明确原因。
+  std::string motion_reason;
+  if (!motionOutputAllowed(motion_reason)) {
+    response->success = false;
+    response->message = motion_reason;
+    return;
+  }
+  if (!motion_) {
+    response->success = false;
+    response->message = "MoveIt 尚未初始化";
+    return;
+  }
+  if (contact_recovery_required_.load()) {
+    response->success = false;
+    response->message =
+      "上一周期可能停在接触区；现场人工撤离并确认后调用 acknowledge_recovery";
+    return;
+  }
+  bool expected = false;
+  if (!running_.compare_exchange_strong(expected, true)) {
+    response->success = false;
+    response->message = "已有靠近/抓取周期正在运行，不能移动拍照位姿";
+    return;
+  }
+  // 提前返回路径统一经 finish 解除占用并刷新状态投影。
+  const auto finish = [this, &response, &claim](bool success, const std::string & message) {
+      running_.store(false);
+      if (claim.owns_lock()) {claim.unlock();}
+      publishState();
+      response->success = success;
+      response->message = message;
+    };
+  const bool execute = execution_enabled_.load();
+  if (execute && !from_survey_action && !execution_armed_.exchange(false)) {
+    finish(false, "手动拍照位运动须先 set_execution_armed");
+    return;
+  }
+  std::string message;
+  const bool success = motion_->goToPhotoPose(params_.photo_pose_named_target, execute, message);
+  finish(success, message);
+}
+
+MoveItMotionInterface::MoveItMotionInterface(
+  std::shared_ptr<moveit::planning_interface::MoveGroupInterface> move_group,
+  tf2_ros::Buffer * tf_buffer,
+  rclcpp::Logger logger,
+  rclcpp::Clock::SharedPtr clock,
+  MoveItMotionConfig config,
+  rclcpp::Client<moveit_msgs::srv::GetPlanningScene>::SharedPtr planning_scene_client,
+  std::function<bool(bool execute, std::string &)> safety_gate,
+  std::function<void(const std::string &)> safety_block_hook,
+  std::function<bool()> cancel_probe)
+: move_group_shared_(std::move(move_group)),
+  move_group_(move_group_shared_.get()),
+  tf_buffer_(tf_buffer),
+  logger_(std::move(logger)),
+  clock_(std::move(clock)),
+  config_(std::move(config)),
+  planning_scene_client_(std::move(planning_scene_client)),
+  safety_gate_(std::move(safety_gate)),
+  safety_block_hook_(std::move(safety_block_hook)),
+  cancel_probe_(std::move(cancel_probe)),
+  retiring_(std::make_unique<RetireBucket>())
+{
+}
+
+MoveItMotionInterface::~MoveItMotionInterface()
+{
+  retiring_->dispose();
+}
+
+bool MoveItMotionInterface::executionIdle() const
+{
+  return executing_.load() == 0;
+}
+
+void MoveItMotionInterface::stopExecution()
+{
+  // MGI::stop 发 move_group 级停止事件（trajectory_execution_event 话题），
+  // 与哪个接口实例发起执行无关；供 MTC 等不暴露 stop 的路径共用。
+  move_group_->stop();
+}
+
+moveit::core::MoveItErrorCode MoveItMotionInterface::boundedExecute(
+  moveit::planning_interface::MoveGroupInterface::Plan & plan, std::string & rejection,
+  const std::string & audit_label)
+{
+  rejection.clear();
+  if (!fitsExecutionTimeout(
+      plannedDuration(plan.trajectory), config_.execute_timeout_s, rejection))
+  {
+    RCLCPP_WARN(logger_, "%s", rejection.c_str());
+    return moveit::core::MoveItErrorCode::INVALID_MOTION_PLAN;
+  }
+  // 同步 execute 在 move_group TEM 异常（2026-09-23 travel_max 起的 stop
+  // 事件风暴，8.2 万行不停）时永久阻塞且不理取消。有界守卫先到先收；
+  // 弃等线程移交 retiring_，闭包只持共享 MGI 与 Plan 拷贝（不引用 this），
+  // MGI 生存期由 shared_ptr 维持，节点析构无 UAF（审查 P0-1/P1-1 修复）。
+  retiring_->reap();
+  if (retiring_->size() > 0) {
+    // 单飞不变量：MGI::execute 非线程安全，滞留 worker 仍占着 execute
+    // 调用时并发再入会竞态（2026-09-23 M1r peach_arm SIGSEGV 根因）。
+    RCLCPP_WARN_THROTTLE(
+      logger_, *clock_, 10000,
+      "上一执行仍滞留 MGI（%zu 个），拒绝并发 execute（防竞态）",
+      retiring_->size());
+    return moveit::core::MoveItErrorCode::FAILURE;
+  }
+  // 命令入口已独占，底层仍防御同时进入 execute。
+  int expected = 0;
+  if (!executing_.compare_exchange_strong(expected, 1)) {
+    RCLCPP_WARN_THROTTLE(
+      logger_, *clock_, 10000,
+      "另一执行在途（executing=%d），拒绝并发 execute", expected);
+    return moveit::core::MoveItErrorCode::FAILURE;
+  }
+  struct Guard
+  {
+    std::atomic_int & counter;
+    ~Guard()
+    {
+      counter.fetch_sub(1);
+    }
+  } guard{executing_};
+  auto plan_copy =
+    std::make_shared<moveit::planning_interface::MoveGroupInterface::Plan>(
+      std::move(plan));
+  auto mgi = move_group_shared_;
+  auto logger = logger_;
+  bool abandoned = false;
+  const auto rc = runBoundedExecute(
+    [mgi, plan_copy, audit_label] {
+      if (trajectoryAuditEnabled()) {
+        auditJointTrajectory(
+          plan_copy->trajectory.joint_trajectory, mgi->getRobotModel(),
+          "move_group_execute", audit_label);
+      }
+      return mgi->execute(*plan_copy);
+    },
+    [mgi] {mgi->stop();}, cancel_probe_, config_.execute_timeout_s,
+    logger, *retiring_, &abandoned);
+  if (abandoned) {
+    RCLCPP_ERROR(
+      logger_, "执行 stop 后未在宽限内返回：线程移交后台（滞留 %zu），动作通道已释放",
+      retiring_->size());
+  }
+  return rc;
+}
+
+std::optional<Eigen::Isometry3d> MoveItMotionInterface::lookupTransform(
+  const std::string & target, const std::string & source)
+{
+  try {
+    const auto transform = tf_buffer_->lookupTransform(
+      target, source, tf2::TimePointZero, 1s);
+    return tf2::transformToEigen(transform.transform);
+  } catch (const tf2::TransformException & error) {
+    RCLCPP_ERROR(
+      logger_, "TF %s <- %s 不可用: %s",
+      target.c_str(), source.c_str(), error.what());
+    return std::nullopt;
+  }
+}
+
+bool MoveItMotionInterface::planOrMoveTip(
+  const Eigen::Isometry3d & tip_pose,
+  const std::string & planner_id,
+  bool execute,
+  const std::string & label,
+  bool allow_fallback, std::string * rejection)
+{
+  geometry_msgs::msg::PoseStamped target;
+  target.header.frame_id = config_.base_frame;
+  target.header.stamp = clock_->now();
+  target.pose = eigenToPose(tip_pose);
+  move_group_->setStartStateToCurrentState();
+  move_group_->setPlanningPipelineId(config_.pilz_pipeline);
+  move_group_->setPlannerId(planner_id);
+  move_group_->setPlanningTime(config_.observe_planning_time_s);
+  move_group_->setNumPlanningAttempts(config_.observe_planning_attempts);
+  move_group_->allowReplanning(false);
+  move_group_->setMaxVelocityScalingFactor(config_.transit_velocity_scaling);
+  move_group_->setMaxAccelerationScalingFactor(config_.transit_acceleration_scaling);
+  move_group_->setPoseTarget(target, config_.tip_frame);
+
+  moveit::planning_interface::MoveGroupInterface::Plan plan;
+  auto result = move_group_->plan(plan);
+  if (result != moveit::core::MoveItErrorCode::SUCCESS &&
+    planner_id == "LIN" && allow_fallback)
+  {
+    RCLCPP_WARN(
+      logger_, "%s 的 LIN 规划失败，改用 Pilz PTP（仅当调用方显式允许）",
+      label.c_str());
+    move_group_->setPlanningPipelineId(config_.pilz_pipeline);
+    move_group_->setPlannerId("PTP");
+    result = move_group_->plan(plan);
+  }
+  move_group_->clearPoseTargets();
+  move_group_->setPlanningTime(config_.default_planning_time_s);
+  move_group_->setNumPlanningAttempts(config_.default_planning_attempts);
+  move_group_->allowReplanning(true);
+  if (result != moveit::core::MoveItErrorCode::SUCCESS) {
+    // 最终规划失败必须带错误码落日志（P0）：MoveTo 失败文案指向"节点日志"
+    RCLCPP_WARN(
+      logger_, "%s 规划最终失败（planner=%s）: %s", label.c_str(),
+      planner_id.c_str(), moveit::core::errorCodeToString(result).c_str());
+    return false;
+  }
+  // 观察禁止大关节绕行（看行程，不按时长）。接触/观察短移不走 PTP 兜底。
+  const TrajectoryGuardLimits camera_limits{
+    config_.observe_max_duration_s,
+    config_.observe_max_total_joint_travel_rad,
+    config_.observe_max_single_joint_travel_rad};
+  const auto guard = inspectApproachTrajectory(
+    plan.trajectory.joint_trajectory, camera_limits);
+  if (!guard.allowed) {
+    RCLCPP_WARN(
+      logger_, "%s 拒绝绕行轨迹: %s", label.c_str(), guard.reason.c_str());
+    return false;
+  }
+  if (!execute) {
+    return true;
+  }
+  std::string safety_reason;
+  if (!safety_gate_(true, safety_reason)) {
+    if (safety_block_hook_) {
+      safety_block_hook_("执行前安全门失败: " + safety_reason);
+    }
+    return false;
+  }
+  // 目标身份/新鲜度不在运动层判定：由阶段执行器 + SafetyGate 单点决策，
+  // 避免与再确认的 stale 放行/记忆锚点获取性移动策略互相否决。
+  std::string budget_reason;
+  const auto execute_result = boundedExecute(plan, budget_reason, label);
+  if (rejection && !budget_reason.empty()) {*rejection = budget_reason;}
+  if (execute_result != moveit::core::MoveItErrorCode::SUCCESS) {
+    RCLCPP_WARN(
+      logger_, "%s 轨迹执行失败: %s", label.c_str(),
+      moveit::core::errorCodeToString(execute_result).c_str());
+  }
+  return execute_result == moveit::core::MoveItErrorCode::SUCCESS;
+}
+
+bool MoveItMotionInterface::planOrMoveCamera(
+  const Eigen::Isometry3d & camera_pose,
+  const std::string & planner_id,
+  bool execute,
+  const std::string & label,
+  bool allow_fallback, std::string * rejection)
+{
+  const auto tip_from_camera = lookupTransform(config_.tip_frame, config_.camera_frame);
+  if (!tip_from_camera) {
+    RCLCPP_WARN(
+      logger_, "%s 换系失败：TF %s←%s 不可用", label.c_str(),
+      config_.tip_frame.c_str(), config_.camera_frame.c_str());
+    return false;
+  }
+  const Eigen::Isometry3d tip_pose = camera_pose * tip_from_camera->inverse();
+  return planOrMoveTip(
+    tip_pose, planner_id, execute, label, allow_fallback, rejection);
+}
+
+bool MoveItMotionInterface::goToPhotoPose(
+  const std::string & named_target, bool execute, std::string & message)
+{
+  std::string reason;
+  if (!safety_gate_(execute, reason)) {
+    message = "拍照位姿安全门未通过: " + reason;
+    return false;
+  }
+  if (atNamedTarget(named_target, message)) {
+    message = "已在命名状态";
+    return true;
+  }
+  // 当前关节在上一趟「拍照位→预抓取」终点、且命名目标就是该轨迹起点
+  // （拍照位，不是 harvest_stow）时，倒放接近轨迹。返程行程等于已过门的
+  // 接近，不再走 transit 6 / 2.5。有缓存但端点不符时拒绝，不另规划绕路。
+  if (execute && !last_photo_approach_parts_.empty()) {
+    const auto & first = last_photo_approach_parts_.front();
+    const auto & last = last_photo_approach_parts_.back();
+    const auto current = move_group_->getCurrentState();
+    const bool at_approach_end = current && jointsMatchTrajectoryPoint(
+      *current, last.joint_names, last.points.back().positions);
+    const bool names_approach_start = namedTargetMatchesPoint(
+      named_target, first.joint_names, first.points.front().positions);
+    if (at_approach_end && names_approach_start) {
+      return reverseLastApproachToPhoto(named_target, message);
+    }
+    RCLCPP_WARN(
+      logger_, "原路返程缓存端点不符：current_matches_end=%d target_matches_start=%d，拒绝返程",
+      at_approach_end ? 1 : 0, names_approach_start ? 1 : 0);
+    // 任一端点对不上即丢弃，不能在稍后周期碰巧重合时复用旧路径。
+    last_photo_approach_parts_.clear();
+    message = "拍照位姿原路返程失败: 缓存端点不符";
+    return false;
+  }
+  move_group_->setStartStateToCurrentState();
+  if (!move_group_->setNamedTarget(named_target)) {
+    message = "SRDF 中不存在命名状态: " + named_target;
+    return false;
+  }
+  // 先试 Pilz PTP 管线（点到点关节空间），失败回退 OMPL（同 planOrMoveTip 风格）。
+  move_group_->setPlanningPipelineId(config_.pilz_pipeline);
+  move_group_->setPlannerId("PTP");
+  move_group_->setPlanningTime(config_.photo_ptp_planning_time_s);
+  move_group_->setNumPlanningAttempts(std::max(1, config_.default_planning_attempts));
+  move_group_->setMaxVelocityScalingFactor(config_.transit_velocity_scaling);
+  move_group_->setMaxAccelerationScalingFactor(config_.transit_acceleration_scaling);
+  moveit::planning_interface::MoveGroupInterface::Plan plan;
+  auto result = move_group_->plan(plan);
+  if (result != moveit::core::MoveItErrorCode::SUCCESS) {
+    RCLCPP_WARN(
+      logger_, "拍照位姿 Pilz PTP 规划失败(%s)，回退 OMPL（仍须过行程护栏）",
+      moveit::core::errorCodeToString(result).c_str());
+    move_group_->setPlanningPipelineId(config_.fallback_pipeline);
+    move_group_->setPlannerId("");
+    move_group_->setPlanningTime(config_.photo_planning_time_s);
+    result = move_group_->plan(plan);
+  }
+  move_group_->setPlanningTime(config_.default_planning_time_s);
+  if (result != moveit::core::MoveItErrorCode::SUCCESS) {
+    message = "拍照位姿规划失败: " + moveit::core::errorCodeToString(result);
+    return false;
+  }
+  const TrajectoryGuardLimits photo_limits{
+    config_.transit_max_duration_s,
+    config_.transit_max_total_joint_travel_rad,
+    config_.transit_max_single_joint_travel_rad};
+  const auto guard = inspectApproachTrajectory(
+    plan.trajectory.joint_trajectory, photo_limits);
+  if (!guard.allowed) {
+    message = "拍照位姿拒绝绕行轨迹: " + guard.reason;
+    RCLCPP_WARN(logger_, "%s", message.c_str());
+    return false;
+  }
+  if (!execute) {
+    if (!atNamedTarget(named_target, message)) {
+      return false;
+    }
+    message = "拍照位姿规划成功；当前关节已在命名状态（execution 未使能）";
+    return true;
+  }
+  // 执行前复核安全门：规划耗时数秒，期间现场可能拍急停。
+  if (!safety_gate_(true, reason)) {
+    message = "拍照位姿执行前安全门失败: " + reason;
+    return false;
+  }
+  result = boundedExecute(plan, reason, "go_to_named_pose: " + named_target);
+  if (result != moveit::core::MoveItErrorCode::SUCCESS) {
+    if (!reason.empty()) {message = reason; return false;}
+    message = "拍照位姿执行失败: " + moveit::core::errorCodeToString(result);
+    return false;
+  }
+  if (!atNamedTarget(named_target, message)) {
+    return false;
+  }
+  message = "已到达全局拍照位姿";
+  return true;
+}
+
+void MoveItMotionInterface::rememberPhotoApproach(
+  std::vector<trajectory_msgs::msg::JointTrajectory> trajectories)
+{
+  last_photo_approach_parts_.clear();
+  if (!appendExecutedJointTrajectories(
+      last_photo_approach_parts_, trajectories, config_.photo_pose_joint_tolerance_rad))
+  {
+    RCLCPP_WARN(logger_, "接近返程缓存失效：轨迹或接缝不合法");
+    return;
+  }
+}
+
+void MoveItMotionInterface::appendPhotoApproach(
+  std::vector<trajectory_msgs::msg::JointTrajectory> trajectories)
+{
+  if (last_photo_approach_parts_.empty()) {
+    return;
+  }
+  if (!appendExecutedJointTrajectories(
+      last_photo_approach_parts_, trajectories, config_.photo_pose_joint_tolerance_rad))
+  {
+    RCLCPP_WARN(logger_, "预抓取修正返程缓存失效：轨迹或接缝不合法");
+    return;
+  }
+}
+
+void MoveItMotionInterface::clearPhotoApproach()
+{
+  last_photo_approach_parts_.clear();
+}
+
+bool MoveItMotionInterface::jointsMatchTrajectoryPoint(
+  const moveit::core::RobotState & state,
+  const std::vector<std::string> & joint_names,
+  const std::vector<double> & positions) const
+{
+  if (joint_names.empty() || joint_names.size() != positions.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < joint_names.size(); ++i) {
+    const double delta = std::abs(
+      state.getVariablePosition(joint_names[i]) - positions[i]);
+    if (!std::isfinite(delta) ||
+      delta > config_.photo_pose_joint_tolerance_rad)
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool MoveItMotionInterface::namedTargetMatchesPoint(
+  const std::string & named_target,
+  const std::vector<std::string> & joint_names,
+  const std::vector<double> & positions) const
+{
+  if (move_group_ == nullptr) {
+    return false;
+  }
+  const auto robot_model = move_group_->getRobotModel();
+  const auto * group = robot_model->getJointModelGroup(move_group_->getName());
+  if (group == nullptr) {
+    return false;
+  }
+  moveit::core::RobotState named(robot_model);
+  named.setToDefaultValues();
+  if (!named.setToDefaultValues(group, named_target)) {
+    return false;
+  }
+  return jointsMatchTrajectoryPoint(named, joint_names, positions);
+}
+
+bool MoveItMotionInterface::reverseLastApproachToPhoto(
+  const std::string & named_target, std::string & message)
+{
+  std::vector<trajectory_msgs::msg::JointTrajectory> parts;
+  const bool valid = appendExecutedJointTrajectories(
+    parts, last_photo_approach_parts_, config_.photo_pose_joint_tolerance_rad);
+  last_photo_approach_parts_.clear();
+  if (!valid) {
+    message = "拍照位姿原路返程失败: 轨迹或接缝不合法";
+    return false;
+  }
+  // 所有段先核原执行预算，避免已走一段才发现后续缓存不可执行。
+  for (const auto & part : parts) {
+    if (!fitsExecutionTimeout(
+        durationToNs(part.points.back().time_from_start), config_.execute_timeout_s, message))
+    {
+      return false;
+    }
+  }
+  std::size_t index = 0;
+  for (auto part = parts.rbegin(); part != parts.rend(); ++part) {
+    ++index;
+    moveit::planning_interface::MoveGroupInterface::Plan plan;
+    plan.trajectory.joint_trajectory = reverseJointTrajectory(*part);
+    const auto & reversed = plan.trajectory.joint_trajectory;
+    const auto endpoint = reversed.points.back().positions;
+    const auto names = reversed.joint_names;
+    std::string reason;
+    if (!safety_gate_(true, reason) || (cancel_probe_ && cancel_probe_())) {
+      message = "拍照位姿原路返程安全门失败或已取消: " + reason;
+      return false;
+    }
+    auto current = move_group_->getCurrentState();
+    if (!current || !jointsMatchTrajectoryPoint(
+        *current, names, reversed.points.front().positions))
+    {
+      message = "拍照位姿原路返程失败: 分段起点不符";
+      return false;
+    }
+    moveit::core::robotStateToRobotStateMsg(*current, plan.start_state);
+    if (!validateReplayTrajectory(plan, message)) {
+      return false;
+    }
+    // 场景服务等待后再次核起点与授权，不把较早的允许延用到真实下发。
+    current = move_group_->getCurrentState();
+    if (!current || !jointsMatchTrajectoryPoint(
+        *current, names, reversed.points.front().positions))
+    {
+      message = "拍照位姿原路返程失败: 场景复检后起点改变";
+      return false;
+    }
+    if (!safety_gate_(true, reason) || (cancel_probe_ && cancel_probe_())) {
+      message = "拍照位姿原路返程执行前安全门失败或已取消: " + reason;
+      return false;
+    }
+    moveit::core::robotStateToRobotStateMsg(*current, plan.start_state);
+    RCLCPP_INFO(
+      logger_, "拍照位姿沿接近轨迹分段原路返程: segment=%zu/%zu points=%zu duration=%.3fs",
+      index, parts.size(), reversed.points.size(),
+      durationToSec(reversed.points.back().time_from_start));
+    const auto result = boundedExecute(
+      plan, reason, "reverse_to_photo: " + named_target + " segment=" +
+      std::to_string(index) + "/" + std::to_string(parts.size()));
+    if (result != moveit::core::MoveItErrorCode::SUCCESS) {
+      message = reason.empty() ? "拍照位姿原路返程执行失败: " +
+        moveit::core::errorCodeToString(result) : reason;
+      return false;
+    }
+    current = move_group_->getCurrentState();
+    if (!current || !jointsMatchTrajectoryPoint(*current, names, endpoint)) {
+      message = "拍照位姿原路返程失败: 分段终点不符";
+      return false;
+    }
+  }
+  if (!atNamedTarget(named_target, message)) {
+    return false;
+  }
+  message = "已沿接近轨迹原路返回拍照位";
+  return true;
+}
+
+bool MoveItMotionInterface::validateReplayTrajectory(
+  const moveit::planning_interface::MoveGroupInterface::Plan & plan, std::string & reason)
+{
+  // ExecuteTrajectory 直接交给 TEM，不重做规划场景路径检查。
+  // 复用节点现有只读 client；其默认回调组与规划服务组/周期 worker 独立。
+  // 服务须已ready；响应预算500ms，每20ms检查取消，超时清理pending请求。
+  const auto started = std::chrono::steady_clock::now();
+  try {
+    if (!planning_scene_client_ || !planning_scene_client_->service_is_ready()) {
+      reason = "拍照位姿原路返程失败: 场景服务不可用";
+      return false;
+    }
+    // GetPlanningScene 约定 components=0 返回完整场景（含当前 ACM）。
+    auto request = std::make_shared<moveit_msgs::srv::GetPlanningScene::Request>();
+    auto future = planning_scene_client_->async_send_request(request);
+    while (future.wait_for(20ms) != std::future_status::ready) {
+      const bool canceled = cancel_probe_ && cancel_probe_();
+      if (canceled || std::chrono::steady_clock::now() - started >= 500ms) {
+        planning_scene_client_->remove_pending_request(future);
+        reason = canceled ? "拍照位姿原路返程场景读取已取消" :
+          "拍照位姿原路返程失败: 场景读取超时(500ms)";
+        return false;
+      }
+    }
+    // ready 可能发生在截止后（含线程调度延迟），不能绕过接受期限/取消门。
+    const bool canceled = cancel_probe_ && cancel_probe_();
+    if (canceled || std::chrono::steady_clock::now() - started >= 500ms) {
+      planning_scene_client_->remove_pending_request(future);
+      reason = canceled ? "拍照位姿原路返程场景读取已取消" :
+        "拍照位姿原路返程失败: 场景读取超时(500ms)";
+      return false;
+    }
+    const auto response = future.get();
+    planning_scene::PlanningScene scene(move_group_->getRobotModel());
+    const bool valid = response && scene.usePlanningSceneMsg(response->scene) &&
+      scene.isPathValid(plan.start_state, plan.trajectory, move_group_->getName());
+    RCLCPP_INFO(
+      logger_, "原路返程场景复检: elapsed=%.3fs valid=%d",
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(),
+      valid ? 1 : 0);
+    if (!valid) {
+      reason = "拍照位姿原路返程失败: 当前场景路径碰撞或无效";
+      return false;
+    }
+  } catch (const std::exception & error) {
+    reason = "拍照位姿原路返程场景复检异常: " + std::string(error.what());
+    return false;
+  }
+  return true;
+}
+
+bool MoveItMotionInterface::atNamedTarget(
+  const std::string & named_target, std::string & message)
+{
+  if (move_group_ == nullptr) {
+    message = "photo_pose_mismatch: MoveIt 尚未初始化";
+    return false;
+  }
+  const auto robot_model = move_group_->getRobotModel();
+  const auto * group = robot_model->getJointModelGroup(move_group_->getName());
+  if (group == nullptr) {
+    message = "photo_pose_mismatch: unknown_planning_group";
+    return false;
+  }
+  const auto current_ptr = move_group_->getCurrentState();
+  if (!current_ptr) {
+    message = "photo_pose_mismatch: 当前关节态不可用（状态监视器断流）";
+    return false;
+  }
+  const moveit::core::RobotState current = *current_ptr;
+  moveit::core::RobotState named = current;
+  if (!named.setToDefaultValues(group, named_target)) {
+    message = "photo_pose_mismatch: SRDF 中不存在命名状态: " + named_target;
+    return false;
+  }
+  std::ostringstream detail;
+  bool ok = true;
+  for (const std::string & joint_name : group->getActiveJointModelNames()) {
+    const double delta = std::abs(
+      current.getVariablePosition(joint_name) -
+      named.getVariablePosition(joint_name));
+    const double velocity = std::abs(current.getVariableVelocity(joint_name));
+    if (delta > config_.photo_pose_joint_tolerance_rad) {
+      ok = false;
+      detail << ' ' << joint_name << " dq=" << delta;
+    }
+    if (std::isfinite(velocity) &&
+      velocity > config_.photo_pose_max_joint_vel_rad_s)
+    {
+      ok = false;
+      detail << ' ' << joint_name << " vel=" << velocity;
+    }
+  }
+  if (!ok) {
+    message = "photo_pose_mismatch:" + detail.str();
+    return false;
+  }
+  return true;
+}
+
+}  // namespace peach_arm

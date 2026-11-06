@@ -1,0 +1,6 @@
+*.pt binary
+*.onnx binary
+*.npz binary
+*.mcap binary
+*.so binary
+*.so.* binary

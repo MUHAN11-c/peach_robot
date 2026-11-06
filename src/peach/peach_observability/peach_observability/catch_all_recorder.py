@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""
+计算图发现录制：按档位补充固定订阅之外的话题，送入会话 bag.
+
+设计（09-17 用户口径"整个 peach 过程全量录制，便于仿真复现与问题分析"）：
+- activate 后每 2 秒扫描 `get_topic_names_and_types()`；符合档位且类型可用
+  的新话题自动建 bag 专用订阅。已建订阅保留到 stop，不追踪发布者退出。
+- 大流护栏：`level=std`（默认）只订阅关键话题：关节、TF、已下发轨迹、
+  调度/重建结果。感知图和点云仍由 Recorder 只在结果关键段进袋。
+  不订阅相机原流、控制器统计、即时检测图和单帧点云。
+  `level=all` 放开发现白名单，但 Recorder 的控制流等限速仍生效。
+  `level=core` 不建立补充订阅。
+- 排除：固定回调拥有的话题、浏览器投影、/rosout、/parameter_events 和
+  /clock；并非逐消息无损的全域记录。
+"""
+from __future__ import annotations
+
+import threading
+
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+)
+
+EXCLUDE_TOPICS = {'/rosout', '/parameter_events', '/clock'}
+RAW_PATTERNS = ('/image_raw', '/image_rect', '/points', '/depth', '/ir')
+# 默认档只订这些。相机原流、控制器统计和重复点云不进袋。
+STD_KEEP = (
+    '/force/',
+    '/joint_states',
+    '/tf',
+    'follow_joint_trajectory',
+    'execute_trajectory',
+    '/display_planned_path',
+    '/peach/observability/tcp_path',
+    '/peach_arm/execute_target',
+    '/peach_arm/status',
+    '/peach_supervisor/state',
+    '/peach_supervisor/events',
+    '/peach_supervisor/run_harvest',
+    '/peach_supervisor/scene_snapshot',
+    '/peach/reconstruction/grasp_decision',
+    '/peach/reconstruction/refined_',
+    '/peach/reconstruction/status',
+    '/peach/reconstruction/diagnostics',
+    '/peach/reconstruction/preview_cloud',
+    '/peach/reconstruction/tsdf_cloud',
+    '/peach/reconstruction/local_cloud',
+    '/peach/perception/debug_image',
+    '/peach/perception/masks',
+    '/peach/perception/target_observations',
+    '/peach/batch/enables',
+    '/peach_target_reconstruction_node/build_target_model',
+)
+SCAN_PERIOD_S = 2.0
+
+
+def _import_message(type_name: str):
+    """'pkg/msg/Type' → 消息类（rosidl 运行期 import；失败返回 None）."""
+    try:
+        from rosidl_runtime_py.utilities import get_message
+        return get_message(type_name)
+    except Exception:  # noqa: BLE001 未安装/类型失效
+        return None
+
+
+def _is_raw_camera(topic: str) -> bool:
+    return topic.startswith('/camera/') and any(
+        p in topic for p in RAW_PATTERNS)
+
+
+def _std_keep(topic: str) -> bool:
+    """默认档白名单。即时检测图和单帧点云即使名字包含保留片段也不订."""
+    if topic.endswith('debug_image_raw') or topic.endswith('/single_cloud'):
+        return False
+    if 'statistics' in topic or 'introspection' in topic:
+        return False
+    return any(part in topic for part in STD_KEEP)
+
+
+class CatchAllRecorder:
+    """通配话题发现 → bag 专用订阅（线程安全，activate 期启动）."""
+
+    def __init__(self, node, recorder, level: str = 'std', excluded_topics=()):
+        self._excluded_topics = frozenset(excluded_topics)
+        self._node = node
+        self._recorder = recorder
+        self._level = level
+        self._subs = []
+        self._recorded = set()
+        self._timer = None
+        self._lock = threading.Lock()
+
+    def start(self) -> None:
+        """启动：立即扫一遍计算图 + 周期发现新话题（activate 期调用）."""
+        self._scan()
+        self._timer = self._node.create_timer(SCAN_PERIOD_S, self._scan)
+
+    def stop(self) -> None:
+        """
+        停止发现并销毁全部通配订阅（幂等；activate 可重新发现）.
+
+        rclpy 节点对 create_subscription 返回值持强引用：只清 Python
+        列表不 destroy_subscription，deactivate 后回调仍会向记录器入队。
+        """
+        if self._timer is not None:
+            self._node.destroy_timer(self._timer)
+            self._timer = None
+        with self._lock:
+            subs, self._subs = self._subs, []
+            self._recorded.clear()
+        for sub in subs:
+            self._node.destroy_subscription(sub)
+
+    def _allow(self, topic: str) -> bool:
+        if (topic in EXCLUDE_TOPICS or topic in self._excluded_topics
+                or topic in self._recorded):
+            return False
+        if self._level == 'core':
+            return False
+        if self._level != 'all':
+            if _is_raw_camera(topic):
+                return False
+            return _std_keep(topic)
+        return True
+
+    def _scan(self) -> None:
+        try:
+            names = self._node.get_topic_names_and_types()
+        except Exception:  # noqa: BLE001 计算图查询失败下轮重试
+            return
+        for topic, types in names:
+            if not self._allow(topic) or not types:
+                continue
+            msg_type = _import_message(types[0])
+            if msg_type is None:
+                continue
+            sub = self._make_subscription(topic, msg_type)
+            if sub is not None:
+                with self._lock:
+                    self._recorded.add(topic)
+                    self._subs.append(sub)
+                self._node.get_logger().info(
+                    f'全量录制订阅: {topic} [{types[0]}]')
+
+    def _make_subscription(self, topic: str, msg_type):
+        # 端到端 QoS 兼容优先：传感器流 BEST_EFFORT 也能录；unknown 兜底 RELIABLE
+        qos = QoSProfile(
+            depth=5,
+            history=HistoryPolicy.KEEP_LAST,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE)
+        try:
+            sub = self._node.create_subscription(
+                msg_type, topic, self._cb(topic), qos)
+        except Exception:  # noqa: BLE001 类型/QoS 不兼容则按 RELIABLE 重试
+            try:
+                qos.reliability = ReliabilityPolicy.RELIABLE
+                sub = self._node.create_subscription(
+                    msg_type, topic, self._cb(topic), qos)
+            except Exception as error:  # noqa: BLE001
+                self._node.get_logger().warning(
+                    f'全量录制订阅失败 {topic}: {error}')
+                return None
+        return sub
+
+    def _cb(self, topic: str):
+        def callback(message) -> None:
+            if self._recorder is None:
+                return
+            try:
+                self._recorder.handle_raw(topic, message)
+            except Exception as error:  # noqa: BLE001 录制失败不拖垮订阅
+                self._node.get_logger().warning(
+                    f'全量录制写袋失败 {topic}: {error}')
+        return callback

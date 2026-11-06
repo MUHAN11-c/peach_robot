@@ -1,0 +1,508 @@
+{
+  "passed": true,
+  "started_utc": "2026-11-06T18:42:21.364512+00:00",
+  "environment": {
+    "python": "/workspace/aubo_py3.12/bin/python3",
+    "numpy": "1.26.4",
+    "torch": "2.13.0+cpu",
+    "torchvision": "0.28.0+cpu",
+    "ultralytics": "8.3.0",
+    "open3d": "0.19.0",
+    "cv_bridge": "/opt/ros/jazzy/lib/python3.12/site-packages/cv_bridge/__init__.py",
+    "usersite": false,
+    "requirements": [
+      {
+        "package": "numpy",
+        "version": "1.26.4",
+        "matches": true
+      },
+      {
+        "package": "setuptools",
+        "version": "78.1.0",
+        "matches": true
+      },
+      {
+        "package": "scipy",
+        "version": "1.11.4",
+        "matches": true
+      },
+      {
+        "package": "PyYAML",
+        "version": "6.0.1",
+        "matches": true
+      },
+      {
+        "package": "opencv-python",
+        "version": "4.11.0.86",
+        "matches": true
+      },
+      {
+        "package": "matplotlib",
+        "version": "3.11.1",
+        "matches": true
+      },
+      {
+        "package": "torch",
+        "version": "2.13.0+cpu",
+        "matches": true
+      },
+      {
+        "package": "torchvision",
+        "version": "0.28.0+cpu",
+        "matches": true
+      },
+      {
+        "package": "ultralytics",
+        "version": "8.3.0",
+        "matches": true
+      },
+      {
+        "package": "ultralytics-thop",
+        "version": "2.1.5",
+        "matches": true
+      },
+      {
+        "package": "tqdm",
+        "version": "4.67.1",
+        "matches": true
+      },
+      {
+        "package": "open3d",
+        "version": "0.19.0",
+        "matches": true
+      },
+      {
+        "package": "httpx",
+        "version": "0.27.2",
+        "matches": true
+      },
+      {
+        "package": "onnxruntime",
+        "version": "1.20.1",
+        "matches": true
+      },
+      {
+        "package": "pooch",
+        "version": "1.8.2",
+        "matches": true
+      },
+      {
+        "package": "pymatting",
+        "version": "1.1.15",
+        "matches": true
+      },
+      {
+        "package": "numba",
+        "version": "0.60.0",
+        "matches": true
+      },
+      {
+        "package": "llvmlite",
+        "version": "0.43.0",
+        "matches": true
+      },
+      {
+        "package": "trimesh",
+        "version": "4.5.3",
+        "matches": true
+      },
+      {
+        "package": "contourpy",
+        "version": "1.3.3",
+        "matches": true
+      },
+      {
+        "package": "cycler",
+        "version": "0.12.1",
+        "matches": true
+      },
+      {
+        "package": "fonttools",
+        "version": "4.63.0",
+        "matches": true
+      },
+      {
+        "package": "kiwisolver",
+        "version": "1.5.0",
+        "matches": true
+      },
+      {
+        "package": "packaging",
+        "version": "26.2",
+        "matches": true
+      },
+      {
+        "package": "pillow",
+        "version": "12.3.0",
+        "matches": true
+      },
+      {
+        "package": "pyparsing",
+        "version": "3.3.2",
+        "matches": true
+      },
+      {
+        "package": "python-dateutil",
+        "version": "2.9.0.post0",
+        "matches": true
+      },
+      {
+        "package": "six",
+        "version": "1.17.0",
+        "matches": true
+      },
+      {
+        "package": "fastapi",
+        "version": "0.101.0",
+        "matches": true
+      },
+      {
+        "package": "starlette",
+        "version": "0.27.0",
+        "matches": true
+      },
+      {
+        "package": "uvicorn",
+        "version": "0.27.1",
+        "matches": true
+      },
+      {
+        "package": "websockets",
+        "version": "12.0",
+        "matches": true
+      },
+      {
+        "package": "pytest",
+        "version": "7.4.4",
+        "matches": true
+      },
+      {
+        "package": "pytest-cov",
+        "version": "4.1.0",
+        "matches": true
+      },
+      {
+        "package": "semver",
+        "version": "3.0.2",
+        "matches": true
+      }
+    ],
+    "hostname": "peach-clean-room",
+    "namespaces": {
+      "user": "user:[4026533395]",
+      "mnt": "mnt:[4026533397]",
+      "pid": "pid:[4026533403]",
+      "ipc": "ipc:[4026533401]",
+      "net": "net:[4026533404]",
+      "uts": "uts:[4026533398]"
+    },
+    "network_interfaces": [
+      "lo"
+    ],
+    "uid_map": "0       1000          1",
+    "clean_room": true,
+    "planning_plugins": {
+      "pilz_industrial_motion_planner": "/opt/ros/jazzy/share/pilz_industrial_motion_planner",
+      "moveit_planners_stomp": "/opt/ros/jazzy/share/moveit_planners_stomp"
+    },
+    "cjk_font_families": [
+      "Noto Serif CJK JP",
+      "Noto Serif CJK KR",
+      "Noto Serif CJK HK",
+      "Noto Serif CJK SC",
+      "Noto Serif CJK TC",
+      "Noto Sans Mono CJK SC",
+      "Noto Sans Mono CJK TC",
+      "Noto Sans Mono CJK JP",
+      "Noto Sans Mono CJK HK",
+      "Noto Sans Mono CJK KR",
+      "Noto Sans CJK HK",
+      "Noto Sans CJK KR",
+      "Noto Sans CJK JP",
+      "Noto Sans CJK SC",
+      "Noto Sans CJK TC"
+    ]
+  },
+  "readonly_mock": {
+    "passed": true,
+    "controllers": {
+      "joint_trajectory_controller": "active",
+      "dynamic_joint_state_broadcaster": "active",
+      "joint_state_broadcaster": "active"
+    },
+    "lifecycle": {
+      "peach_scene_perception_node": "active",
+      "peach_target_reconstruction_node": "active",
+      "peach_arm": "active",
+      "peach_supervisor": "active"
+    },
+    "plugins": {
+      "AuboE5System": "mock_components/GenericSystem"
+    },
+    "planning_scene_service_ready": true,
+    "counts": {
+      "/joint_states": 1056,
+      "/dynamic_joint_states": 988,
+      "/camera/depth/image_raw": 3,
+      "/camera/color/image_raw": 3,
+      "/camera/depth_registered/points": 3
+    },
+    "received": {
+      "/joint_states": {
+        "name": [
+          "shoulder_joint",
+          "upperArm_joint",
+          "foreArm_joint",
+          "wrist1_joint",
+          "wrist2_joint",
+          "wrist3_joint"
+        ],
+        "position": [
+          0.425175,
+          0.194274,
+          1.679546,
+          1.462579,
+          -0.279948,
+          0.038859
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "effort": [
+          null,
+          null,
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      "/dynamic_joint_states": {
+        "wrist3_joint": {
+          "position": 0.038859,
+          "velocity": 0.0
+        },
+        "shoulder_joint": {
+          "position": 0.425175,
+          "velocity": 0.0
+        },
+        "foreArm_joint": {
+          "position": 1.679546,
+          "velocity": 0.0
+        },
+        "wrist2_joint": {
+          "velocity": 0.0,
+          "position": -0.279948
+        },
+        "upperArm_joint": {
+          "velocity": 0.0,
+          "position": 0.194274
+        },
+        "speed_scaling": {
+          "speed_scaling_factor": 1.0
+        },
+        "wrist1_joint": {
+          "velocity": 0.0,
+          "position": 1.462579
+        },
+        "aubo_io": {
+          "health": null,
+          "send_rate_pps": null,
+          "joint_temp_5": null,
+          "joint_temp_4": null,
+          "joint_temp_1": null,
+          "power_on": null,
+          "tool_ai_0": null,
+          "joint_current_2": null,
+          "di_5": null,
+          "di_3": null,
+          "tag_vel_5": null,
+          "joint_current_4": null,
+          "rib_level": null,
+          "tool_di_0": null,
+          "di_8": null,
+          "tool_ai_1": null,
+          "joint_error_5": null,
+          "joint_error_4": null,
+          "joint_error_0": null,
+          "joint_error_3": null,
+          "tag_vel_4": null,
+          "tag_pos_3": null,
+          "tool_di_1": null,
+          "tag_vel_1": null,
+          "estop": null,
+          "di_12": null,
+          "joint_error_1": null,
+          "joint_error_2": null,
+          "send_queue_points": null,
+          "protective_stop": null,
+          "tag_pos_0": null,
+          "di_4": null,
+          "tag_pos_5": null,
+          "joint_temp_2": null,
+          "collision": null,
+          "tag_pos_2": null,
+          "event_code": null,
+          "di_0": null,
+          "joint_current_1": null,
+          "di_9": null,
+          "in_motion": null,
+          "tag_vel_3": null,
+          "ai_1": null,
+          "ai_3": null,
+          "ai_0": null,
+          "di_13": null,
+          "di_2": null,
+          "di_1": null,
+          "event_type": null,
+          "di_7": null,
+          "tag_pos_1": null,
+          "joint_temp_3": null,
+          "di_10": null,
+          "di_11": null,
+          "tag_pos_4": null,
+          "di_15": null,
+          "tag_vel_2": null,
+          "tag_vel_0": null,
+          "di_14": null,
+          "joint_current_0": null,
+          "joint_current_3": null,
+          "ai_2": null,
+          "di_6": null,
+          "joint_current_5": null,
+          "joint_temp_0": null
+        }
+      },
+      "/camera/depth/image_raw": {
+        "width": 640,
+        "height": 480,
+        "data_bytes": 614400
+      },
+      "/camera/color/image_raw": {
+        "width": 640,
+        "height": 480,
+        "data_bytes": 921600
+      },
+      "/camera/depth_registered/points": {
+        "width": 171892,
+        "height": 1,
+        "data_bytes": 4125408
+      }
+    },
+    "publishers": {
+      "/joint_states": [
+        "joint_state_broadcaster"
+      ],
+      "/dynamic_joint_states": [
+        "dynamic_joint_state_broadcaster"
+      ]
+    },
+    "pages": {
+      "/": 200,
+      "/overview.html": 200,
+      "/monitor.html": 200,
+      "/debug.html": 200,
+      "/analysis.html": 200,
+      "/force.html": 200
+    },
+    "enables": {
+      "execution_enabled": false,
+      "grasp_enabled": false,
+      "tool_enabled": false,
+      "action_active": false
+    },
+    "residuals": [],
+    "cleanup_issues": []
+  },
+  "frozen_grasp": {
+    "passed": true,
+    "request": "deploy_acd92bb0b3f3",
+    "tool_enabled": false,
+    "wrapper_exit": 0,
+    "ledger": {
+      "claimed": [
+        "target_1",
+        "target_2"
+      ],
+      "outcomes": [
+        {
+          "target_id": "target_2",
+          "outcome": 1,
+          "reason": "build_failed: bag_axis_envelope_ill_conditioned; attempts=3; 局部重建完成：1 帧，3717 点（少于推荐 5 帧）；跳过 1 次（missing_mask=1）；重叠指标需 ≥2 帧，本批次不可用；TSDF 1135 点 / mesh 1991 顶点（累计积分 0.00s）；refit 失败（bag_axis_envelope_ill_conditioned）；refit 未产出可用几何",
+          "quality_score": 0.0,
+          "elapsed_s": 1.602,
+          "failure_code": "build_failed",
+          "failure_code_n": 2,
+          "completion_level": 0,
+          "stage_names": [
+            "finalize"
+          ],
+          "stage_durations": [
+            1.513
+          ],
+          "start_unix_ns": 1793990617567683033,
+          "end_unix_ns": 1793990619175310064,
+          "start_ros_ns": 1793990617567676943,
+          "end_ros_ns": 1793990619175299613,
+          "time_basis": "source_clock",
+          "clock_domain": "ros+system",
+          "cycle_id": "deploy_acd92bb0b3f3:target_2",
+          "scene_epoch": 1
+        },
+        {
+          "target_id": "target_1",
+          "outcome": 0,
+          "reason": "周期完成；tool.enabled=false 或未宣称采摘成功",
+          "quality_score": 0.0,
+          "elapsed_s": 18.41,
+          "completion_level": 6,
+          "stage_names": [
+            "finalize",
+            "approach_insert",
+            "reconfirm",
+            "tool",
+            "retreat"
+          ],
+          "stage_durations": [
+            0.431,
+            8.978,
+            0.2,
+            0.0,
+            8.67
+          ],
+          "start_unix_ns": 1793990621654463505,
+          "end_unix_ns": 1793990640070290189,
+          "start_ros_ns": 1793990621654457855,
+          "end_ros_ns": 1793990640070277818,
+          "time_basis": "source_clock",
+          "clock_domain": "ros+system",
+          "cycle_id": "deploy_acd92bb0b3f3:target_1",
+          "scene_epoch": 1
+        }
+      ]
+    },
+    "replay_paused": true,
+    "single_target_successes": 1,
+    "interpretation": "Single fruit L6; fixture cancels the batch; tool disabled.",
+    "residuals": [],
+    "cleanup_issues": []
+  },
+  "recordings": [
+    {
+      "bag": "/workspace/runs/clean_validation/verification_20261106T184137Z/readonly_mock/records/session_20261106_184224/bag",
+      "messages": 14868,
+      "passed": true
+    },
+    {
+      "bag": "/workspace/runs/clean_validation/verification_20261106T184137Z/frozen_grasp/records/session_20261106_184327/bag",
+      "messages": 9848,
+      "passed": true
+    }
+  ],
+  "finished_utc": "2026-11-06T18:44:04.694276+00:00"
+}

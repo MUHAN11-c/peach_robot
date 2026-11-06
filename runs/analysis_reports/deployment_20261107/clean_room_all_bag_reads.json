@@ -1,0 +1,26 @@
+[
+  {
+    "bag": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification/frozen_grasp/records/session_20261106_183726/bag",
+    "messages": 26956,
+    "expected": 26956,
+    "passed": true
+  },
+  {
+    "bag": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification/readonly_mock/records/session_20261106_183614/bag",
+    "messages": 16668,
+    "expected": 16668,
+    "passed": true
+  },
+  {
+    "bag": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification_20261106T184137Z/frozen_grasp/records/session_20261106_184327/bag",
+    "messages": 9848,
+    "expected": 9848,
+    "passed": true
+  },
+  {
+    "bag": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification_20261106T184137Z/readonly_mock/records/session_20261106_184224/bag",
+    "messages": 14868,
+    "expected": 14868,
+    "passed": true
+  }
+]

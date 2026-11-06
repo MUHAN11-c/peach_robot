@@ -1,0 +1,27 @@
+{
+  "schema": "peach-github-publication-v1",
+  "version": "1.0.0",
+  "repository": "https://github.com/MUHAN11-c/peach_robot",
+  "validated_deployment_archive": {
+    "name": "peach_robot-v1.0.0.tar.zst",
+    "sha256": "90e22e3ca021195261c3dd7acae4ad5fc5b8005bd6b8a04302d7b5eb8016bd93",
+    "release_url": "https://github.com/MUHAN11-c/peach_robot/releases/tag/v1.0.0"
+  },
+  "source_base": "RELEASE_MANIFEST.json describes the immutable validated deployment archive; Git adds publication documentation and .gitkeep metadata.",
+  "application_and_readonly_driver_sources_unchanged": true,
+  "git_adaptations": [
+    "README.md GitHub clone and Release entry",
+    "README_PACKAGE.md portable download entry",
+    ".gitignore explicit minimal fixture and selected evidence allowlist",
+    ".gitattributes binary classification",
+    "six .gitkeep markers for empty directories"
+  ],
+  "accepted_scope": "Ubuntu 24.04 amd64 / ROS Jazzy / Python 3.12 / CPU mock and frozen replay",
+  "checks": {
+    "ros_packages": 45,
+    "python_pins": 35,
+    "http_fixture_browser_passed": 28,
+    "mock_single_target_level": 6,
+    "tool_enabled": false
+  }
+}

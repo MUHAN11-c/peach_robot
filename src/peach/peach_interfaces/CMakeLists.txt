@@ -1,0 +1,80 @@
+cmake_minimum_required(VERSION 3.22)
+project(peach_interfaces)
+
+find_package(ament_cmake REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+find_package(action_msgs REQUIRED)
+find_package(builtin_interfaces REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/BagFitting.msg"
+  "msg/BagFittingArray.msg"
+  "msg/BagGrasp2D.msg"
+  "msg/BagGraspCandidate.msg"
+  "msg/BagGraspCandidateArray.msg"
+  "msg/CanonicalEvent.msg"
+  "msg/Clearance.msg"
+  "msg/DepositResult.msg"
+  "msg/Enables.msg"
+  "msg/FailureCode.msg"
+  "msg/ForceSample.msg"
+  "msg/GraspDecision.msg"
+  "msg/GraspHypothesis.msg"
+  "msg/HarvestOperationStatus.msg"
+  "msg/HarvestResult.msg"
+  "msg/HarvestState.msg"
+  "msg/HarvestSummary.msg"
+  "msg/HarvestTargetReport.msg"
+  "msg/PeachTargetObservation.msg"
+  "msg/PeachTargetObservationArray.msg"
+  "msg/PregraspVerification.msg"
+  "msg/ReconstructionStatus.msg"
+  "msg/SceneSnapshot.msg"
+  "msg/ShapeHypothesis.msg"
+  "msg/ToolState.msg"
+  "msg/TargetModel.msg"
+  "msg/TargetOutcome.msg"
+  "msg/TargetQuality.msg"
+  "msg/VehicleState.msg"
+  "msg/Verification.msg"
+  "srv/BeginScene.srv"
+  "srv/CheckReachability.srv"
+  "srv/ControlTask.srv"
+  "srv/FireStep.srv"
+  "srv/SetBatchPolicy.srv"
+  "srv/SetEnables.srv"
+  "action/BuildTargetModel.action"
+  "action/ExecuteTarget.action"
+  "action/MoveTo.action"
+  "action/NavigateToWorksite.action"
+  "action/RunHarvest.action"
+  "action/SurveyScene.action"
+  DEPENDENCIES
+    action_msgs
+    builtin_interfaces
+    diagnostic_msgs
+    geometry_msgs
+    sensor_msgs
+    std_msgs
+)
+
+ament_export_dependencies(rosidl_default_runtime)
+install(FILES LICENSE DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
+# check_interface_manifest.py 不装 install：脚本按源码树定位 peach_* 包
+# （io.md 的漂移核对命令也按源码路径调用），install 副本路径推导不成立。
+
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  set(ament_cmake_copyright_FOUND TRUE)  # 文件头 BSD 等项目结束再补
+  ament_lint_auto_find_test_dependencies()
+  add_test(
+    NAME check_interface_manifest
+    COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_interface_manifest.py")
+endif()
+
+ament_package()

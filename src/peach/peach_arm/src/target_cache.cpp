@@ -1,0 +1,746 @@
+// 功能：当前目标观测/精化/GraspDecision 缓存与 ID 调和。纯核，零 ROS；不写账本。
+#include "peach_arm/target_cache.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "peach_arm/angles.hpp"
+#include "peach_arm/math_utils.hpp"
+#include "peach_arm/model_contract.hpp"
+
+namespace peach_arm
+{
+namespace
+{
+constexpr uint8_t kTrackingObserved = 0;  // PeachTargetObservation.OBSERVED
+
+// 观测 / 精化消息的检测框字段同名同义，无公共基类可借，逐字段拷入缓存。
+template<typename Src>
+void copyBbox(CachedTarget & dest, const Src & src)
+{
+  dest.bbox_x = src.bbox_x;
+  dest.bbox_y = src.bbox_y;
+  dest.bbox_w = src.bbox_w;
+  dest.bbox_h = src.bbox_h;
+  dest.image_width = src.image_width;
+  dest.image_height = src.image_height;
+  dest.bbox_valid = src.bbox_valid;
+  dest.foreground_ratio = src.foreground_ratio;
+}
+
+// 新鲜判据（io.md 门口径）：live_observation_required=true 只认末次 live
+// 观测（received_s）；否则要求 OBSERVED 且 updated_s > after_s。
+bool freshEnough(const CachedTarget & target, double after_s, bool live_required)
+{
+  if (!target.valid) {
+    return false;
+  }
+  if (live_required) {
+    return target.received_s > after_s;
+  }
+  return target.tracking_status == kTrackingObserved && target.updated_s > after_s;
+}
+
+// 新鲜度比较基准：OBSERVED 且 updated_s 更新时取 updated_s，
+// 否则退回末次 live 观测 received_s（非 OBSERVED 不被 updated_s 抬高）。
+double freshnessStamp(const CachedTarget & target)
+{
+  if (target.tracking_status == kTrackingObserved &&
+    target.updated_s > target.received_s)
+  {
+    return target.updated_s;
+  }
+  return target.received_s;
+}
+
+// 单目标观测调和（W5-13，自 updateSelectedTarget/updateLockedTargets 抽出，
+// 两路 ~90% 重复的逐字段拷贝收敛单实现）：诊断透传每帧刷新（含非观测帧），
+// 锚点几何（center/axis/travel/diameter）凡携带即采用（含 LOST 帧记忆锚点——世界系
+// 身份记忆的意义所在，短暂不可见仍可派发/规划），entry_pose/received_s 仅
+// OBSERVED 有效观测帧刷新（安全门按 max_age 判陈旧）。Update 取
+// SelectedTargetUpdate / LockedTargetUpdate（字段同名同义）。
+template<typename Update>
+void applyObservation(CachedTarget & entry, const Update & update, double now_s)
+{
+  if (entry.scene_epoch != update.scene_epoch) {
+    entry.valid = false;
+    entry.received_s = 0.0;
+  }
+  entry.scene_epoch = update.scene_epoch;
+  entry.swinging = update.swinging;
+  entry.tracking_status = update.tracking_status;
+  copyBbox(entry, update);
+  entry.updated_s = now_s;
+  const bool has_anchor = nonzeroFinite(update.bottom) &&
+    nonzeroFinite(update.neck) && nonzeroFinite(update.axis);
+  if (has_anchor) {
+    entry.bottom = update.bottom;
+    entry.neck = update.neck;
+    entry.center = 0.5 * (update.bottom + update.neck);
+    entry.initial_axis = update.axis.normalized();
+    entry.suggested_travel_m = update.suggested_travel_m;
+    entry.bag_diameter_upper_m = update.bag_diameter_upper_m;
+    entry.valid = true;
+  }
+  if (update.observed && has_anchor) {
+    entry.initial_pose = update.entry_pose;
+    entry.received_s = now_s;
+  }
+}
+}  // namespace
+
+TargetCache::TargetCache(std::function<double()> clock_s)
+: clock_s_(std::move(clock_s))
+{
+}
+
+void TargetCache::updateSelectedTarget(const SelectedTargetUpdate & update)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  // transient_local 的精化结果可能早于 volatile 的目标观测到达。首次获知目标时，
+  // 若已缓存结果属于同一 target_id，必须保留；仅在确认 ID 冲突时清理旧目标数据。
+  const bool target_changed = !target_.id.empty() && target_.id != update.selected_id;
+  const bool refined_changed =
+    (!refined_.id.empty() && refined_.id != update.selected_id) ||
+    (!quality_.refined_target_id.empty() &&
+    quality_.refined_target_id != update.selected_id);
+  const bool decision_changed =
+    !grasp_decision_target_id_.empty() &&
+    grasp_decision_target_id_ != update.selected_id;
+  const bool run_changed = !target_.harvest_run_id.empty() &&
+    !update.harvest_run_id.empty() && target_.harvest_run_id != update.harvest_run_id;
+  const bool model_run_changed = !model_.identity.run_id.empty() &&
+    !update.harvest_run_id.empty() && model_.identity.run_id != update.harvest_run_id;
+  // 未精化钉扎的身份是 grasp_decision_target_id_。上一颗留下的 target_.id
+  // 或 harvest_run_id 还没跟上时，同目标新帧会看起来像换目标或换批次，
+  // 把刚钉住的套入许可清掉。别的目标的选中帧也不许冲掉当前钉扎。
+  const bool pinned = unrefined_hold_ && !grasp_decision_target_id_.empty();
+  if (pinned && update.selected_id != grasp_decision_target_id_) {
+    return;
+  }
+  const bool same_pin = pinned &&
+    update.selected_id == grasp_decision_target_id_;
+  if (!same_pin &&
+    (target_changed || refined_changed || decision_changed || run_changed ||
+    model_run_changed))
+  {
+    model_ = ModelSnapshot();
+    model_generated_s_ = 0.0;
+    decision_committed_ = false;
+    decision_revoked_ = false;
+    target_.valid = false;
+    refined_ = CachedRefined();
+    quality_.refined_target_id.clear();
+    quality_.refined_rmse_m = -1.0;
+    quality_.refined_inlier_ratio = -1.0;
+    quality_.refined_accept = false;
+    quality_.grasp_allowed = false;
+    grasp_decision_target_id_.clear();
+    unrefined_hold_ = false;
+  }
+  target_.id = update.selected_id;
+  target_.harvest_run_id = update.harvest_run_id;
+  applyObservation(target_, update, clock_s_());
+  quality_.selected_target_id = target_.id;
+  cv_.notify_all();
+}
+
+void TargetCache::updateLockedTargets(
+  bool target_set_locked, const std::string & harvest_run_id,
+  const std::vector<LockedTargetUpdate> & updates)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!target_set_locked) {
+    // 未锁定帧 observations 恒空（感知锁定前只发收齐摘要），锁定集缓存无
+    // 意义：清空并复位批次记钥，下次锁定按新集合整体重建。
+    if (!locked_targets_.empty() || !locked_run_id_.empty()) {
+      locked_targets_.clear();
+      locked_run_id_.clear();
+      cv_.notify_all();
+    }
+    return;
+  }
+  if (locked_run_id_ != harvest_run_id) {
+    // 批次切换：跨批次身份不复用（run_id 是感知身份记忆的生命期边界），
+    // 旧批次锚点全部作废后按新批次重建。
+    locked_targets_.clear();
+    locked_run_id_ = harvest_run_id;
+  }
+  for (const auto & update : updates) {
+    if (update.target_id.empty()) {
+      continue;
+    }
+    CachedTarget & entry = locked_targets_[update.target_id];
+    entry.id = update.target_id;
+    entry.harvest_run_id = harvest_run_id;
+    applyObservation(entry, update, clock_s_());
+  }
+  cv_.notify_all();
+}
+
+void TargetCache::updateReconstructionDiagnostics(
+  const ReconstructionDiagnosticsUpdate & update)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (unrefined_hold_) {
+    return;
+  }
+  quality_.reconstruction_target_id = update.target_id;
+  quality_.reconstruction_state = update.state;
+  quality_.captured_views = update.captured_views;
+  observed_directions_ = update.view_directions;
+  quality_.station_count = update.view_directions.size();
+  quality_.max_baseline_deg = update.max_baseline_deg;
+  quality_.mean_nearest_baseline_deg = update.mean_nearest_baseline_deg;
+  quality_.mean_depth_ratio = update.mean_depth_ratio;
+  diagnostics_received_s_ = clock_s_();
+  diagnostics_seen_ = true;
+  // 诊断心跳只证明进程还在发，不得把 data_age 清零，也不得续签 valid_until。
+  if (model_generated_s_ > 0.0) {
+    quality_.data_age_s = std::max(0.0, clock_s_() - model_generated_s_);
+  }
+  cv_.notify_all();
+}
+
+bool TargetCache::updateGraspDecision(const std::string & target_id, bool allowed)
+{
+  ModelIdentity identity;
+  identity.target_id = target_id;
+  return updateGraspDecision(identity, allowed, 0.0);
+}
+
+bool TargetCache::updateGraspDecision(
+  const ModelIdentity & identity, bool allowed, double valid_until_s)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  (void)valid_until_s;  // 心跳/决策不得续签；有效期只经 replaceModelSnapshot。
+  if (unrefined_hold_) {
+    // 验证路径：重建未融合的 GraspDecision（常 allowed=false）不得冲掉
+    // promoteUnrefinedGeometry 钉住的套入入口。
+    return true;
+  }
+  if (identity.target_id.empty()) {
+    grasp_decision_target_id_.clear();
+    quality_.grasp_allowed = false;
+    cv_.notify_all();
+    return true;
+  }
+  if (!target_.id.empty() && identity.target_id != target_.id) {
+    return false;
+  }
+  if (!model_.identity.run_id.empty() && !identity.run_id.empty() &&
+    !identitiesMatch(model_.identity, identity))
+  {
+    quality_.grasp_allowed = false;
+    return false;
+  }
+  grasp_decision_target_id_ = identity.target_id;
+  quality_.grasp_allowed = allowed;
+  cv_.notify_all();
+  return true;
+}
+
+void TargetCache::replaceModelSnapshot(const ModelSnapshot & snapshot)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  model_ = snapshot;
+  model_generated_s_ = snapshot.generated_s;
+  quality_.data_age_s = 0.0;
+  cv_.notify_all();
+}
+
+ModelSnapshot TargetCache::modelSnapshot() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return model_;
+}
+
+std::optional<DecisionSnapshot> TargetCache::decisionSnapshot() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return decisionSnapshotLocked();
+}
+
+std::optional<DecisionSnapshot> TargetCache::decisionSnapshotLocked() const
+{
+  if (!decision_committed_ || !refined_.valid ||
+    !modelExecutable(model_, clock_s_(), false))
+  {
+    return std::nullopt;
+  }
+  QualitySnapshot quality = quality_;
+  quality.data_age_s = std::max(0.0, clock_s_() - model_generated_s_);
+  quality.axis_angle_deg = target_.valid ?
+    angleDeg(target_.initial_axis, refined_.axis, AngleDegenerate::Invalid, 1.0e-6) : -1.0;
+  return DecisionSnapshot{model_, refined_, quality};
+}
+
+bool TargetCache::updateDecisionSnapshot(
+  const ModelSnapshot & model, const RefinedPoseUpdate & geometry,
+  double rmse_m, double inlier_ratio)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (unrefined_hold_) {
+    return false;
+  }
+  const auto & identity = model.identity;
+  // 先核身份再写任何缓存：外来消息不得先替换 model_ 再被目标门拒绝。
+  if ((!target_.id.empty() && !identity.target_id.empty() &&
+    target_.id != identity.target_id) ||
+    (!target_.harvest_run_id.empty() && !identity.run_id.empty() &&
+    target_.harvest_run_id != identity.run_id))
+  {
+    return false;
+  }
+  if (!model_.identity.run_id.empty() && model_.identity.run_id == identity.run_id &&
+    model_.identity.target_id == identity.target_id &&
+    (identity.scene_epoch < model_.identity.scene_epoch ||
+    (identity.scene_epoch == model_.identity.scene_epoch &&
+    model.generated_s < model_.generated_s)))
+  {
+    return false;  // 不接收迟到的旧版本；生成时间由生产者冻结。
+  }
+  if (!identityComplete(identity)) {
+    // 撤销清执行数据但保留身份/生成时间高水位；旧消息不能趁空缓存重新授权。
+    model_.generated_s = std::max(model_.generated_s, model.generated_s);
+    model_.valid_until_s = 0.0;
+    model_.geometry = Capability::Invalid;
+    model_.pregrasp = Capability::Invalid;
+    model_.sleeve = Capability::Invalid;
+    model_.cut = Capability::Invalid;
+    model_generated_s_ = model_.generated_s;
+    decision_revoked_ = true;
+    refined_ = CachedRefined();
+    quality_.refined_accept = false;
+    quality_.grasp_allowed = false;
+    grasp_decision_target_id_.clear();
+    decision_committed_ = false;
+    cv_.notify_all();
+    return false;
+  }
+  const bool identity_matches = identitiesMatch(model_.identity, identity);
+  if (decision_revoked_ && identity_matches) {
+    return false;
+  }
+  const bool same_revision = decision_committed_ && identity_matches;
+  const auto previous = model_;
+  const double generated_s = same_revision ? model_.generated_s : model.generated_s;
+  const double valid_until_s = same_revision ?
+    std::min(model_.valid_until_s, model.valid_until_s) : model.valid_until_s;
+  model_ = model;
+  if (same_revision) {
+    // 同一修订的 INVALID 是不可执行证据；状态改善必须由新修订证明。
+    if (previous.geometry == Capability::Invalid) {model_.geometry = Capability::Invalid;}
+    if (previous.pregrasp == Capability::Invalid) {model_.pregrasp = Capability::Invalid;}
+    if (previous.sleeve == Capability::Invalid) {model_.sleeve = Capability::Invalid;}
+    if (previous.cut == Capability::Invalid) {model_.cut = Capability::Invalid;}
+  }
+  decision_revoked_ = false;
+  model_.generated_s = generated_s;
+  model_.valid_until_s = valid_until_s;
+  model_generated_s_ = generated_s;
+  decision_committed_ = true;
+  grasp_decision_target_id_ = identity.target_id;
+  refined_ = CachedRefined();
+  refined_.id = identity.target_id;
+  refined_.entry = geometry.entry;
+  refined_.bottom = geometry.bottom;
+  refined_.neck = geometry.neck;
+  refined_.axis = geometry.axis;
+  refined_.suggested_travel_m = geometry.suggested_travel_m;
+  refined_.bag_diameter_upper_m = geometry.bag_diameter_upper_m;
+  refined_.valid = geometry.target_id == identity.target_id &&
+    model_.geometry == Capability::Valid && geometry.entry.allFinite() &&
+    geometry.bottom.allFinite() && geometry.neck.allFinite() && nonzeroFinite(geometry.axis);
+  quality_.refined_target_id = identity.target_id;
+  quality_.reconstruction_target_id = identity.target_id;
+  quality_.reconstruction_state = refined_.valid ? "READY" : "INVALID";
+  quality_.refined_accept = refined_.valid;
+  quality_.refined_rmse_m = std::isfinite(rmse_m) && rmse_m >= 0.0 ? rmse_m : -1.0;
+  quality_.refined_inlier_ratio =
+    std::isfinite(inlier_ratio) && inlier_ratio >= 0.0 && inlier_ratio <= 1.0 ?
+    inlier_ratio : -1.0;
+  quality_.grasp_allowed = refined_.valid &&
+    allowedFromCapabilities(model_.geometry, model_.sleeve, model_.cut) &&
+    modelExecutable(model_, clock_s_(), false);
+  cv_.notify_all();
+  return true;
+}
+
+std::optional<DecisionSnapshot> TargetCache::waitForDecision(
+  const ModelIdentity & expected, double timeout_s, const std::atomic_bool & cancel) const
+{
+  std::unique_lock<std::mutex> lock(mutex_);
+  std::optional<DecisionSnapshot> decision;
+  cv_.wait_for(
+    lock, std::chrono::duration<double>(timeout_s), [&]() {
+      if (cancel.load()) {return true;}
+      if (decision_committed_ && matchesRequestedModel(expected, model_.identity)) {
+        decision = decisionSnapshotLocked();
+      }
+      return decision.has_value();
+    });
+  return cancel.load() ? std::nullopt : decision;
+}
+
+bool TargetCache::updateRefinedPose(
+  const RefinedPoseUpdate & update, std::string * reject_reason)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (decision_committed_ || (unrefined_hold_ && !update.clear)) {
+    if (reject_reason) {
+      *reject_reason = decision_committed_ ? "authoritative_decision" : "unrefined_hold";
+    }
+    return false;
+  }
+  if (update.clear) {
+    refined_ = CachedRefined();
+    quality_.refined_target_id.clear();
+    return true;
+  }
+  if (!target_.id.empty() && update.target_id != target_.id) {
+    if (reject_reason) {
+      *reject_reason = "target_mismatch";
+    }
+    return false;
+  }
+  refined_ = CachedRefined();
+  refined_.id = update.target_id;
+  refined_.entry = update.entry;
+  refined_.bottom = update.bottom;
+  refined_.neck = update.neck;
+  refined_.axis = update.axis;
+  refined_.suggested_travel_m = update.suggested_travel_m;
+  refined_.bag_diameter_upper_m = update.bag_diameter_upper_m;
+  refined_.valid = nonzeroFinite(refined_.axis) && refined_.entry.allFinite();
+  quality_.refined_target_id = update.target_id;
+  quality_.refined_accept = update.accepted;
+  cv_.notify_all();
+  return true;
+}
+
+bool TargetCache::updateRefinedFitting(
+  const RefinedFittingUpdate & update, std::string * reject_reason)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (decision_committed_ || (unrefined_hold_ && !update.clear)) {
+    if (reject_reason) {
+      *reject_reason = decision_committed_ ? "authoritative_decision" : "unrefined_hold";
+    }
+    return false;
+  }
+  if (update.clear) {
+    // 无效标量约定 -1（同 QualitySnapshot 默认）：原 0.0 会把「无精化」
+    // 误投影成「完美拟合」（W5-13 修复）。
+    quality_.refined_rmse_m = -1.0;
+    quality_.refined_inlier_ratio = -1.0;
+    quality_.refined_accept = false;
+    if (refined_.id.empty()) {
+      quality_.refined_target_id.clear();
+    }
+    cv_.notify_all();
+    return true;
+  }
+  const std::string expected_id = refined_.id.empty() ? target_.id : refined_.id;
+  if (!expected_id.empty() && update.target_id != expected_id) {
+    if (reject_reason) {
+      *reject_reason = "target_mismatch";
+    }
+    return false;
+  }
+  // 节点刚启动时可能尚未收到 volatile 目标观测。先按 target_id 缓存锁存的
+  // 拟合指标，后续 updateSelectedTarget() 会保留同 ID 数据或清除冲突数据。
+  quality_.refined_target_id = update.target_id;
+  if (update.is_fruit) {
+    quality_.refined_rmse_m = update.sphere_rms_m;
+    quality_.refined_inlier_ratio = update.sphere_inlier_ratio;
+  } else {
+    quality_.refined_rmse_m = update.cylinder_rms_m;
+    quality_.refined_inlier_ratio = update.cylinder_inlier_ratio;
+  }
+  quality_.refined_accept = update.accepted;
+  cv_.notify_all();
+  return true;
+}
+
+std::optional<CachedTarget> TargetCache::targetSnapshot() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!target_.valid) {
+    return std::nullopt;
+  }
+  return target_;
+}
+
+std::optional<CachedTarget> TargetCache::lockedTargetSnapshot(
+  const std::string & target_id) const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto it = locked_targets_.find(target_id);
+  if (it == locked_targets_.end() || !it->second.valid) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
+std::vector<Eigen::Vector3d> TargetCache::lockedNeighborCenters(
+  const std::string & exclude_id) const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<Eigen::Vector3d> centers;
+  centers.reserve(locked_targets_.size());
+  for (const auto & item : locked_targets_) {
+    if (item.first == exclude_id || !item.second.valid) {
+      continue;
+    }
+    centers.push_back(item.second.center);
+  }
+  return centers;
+}
+
+TargetGateSample TargetCache::lockedTargetGateSample(
+  const std::string & target_id) const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto it = locked_targets_.find(target_id);
+  if (it == locked_targets_.end()) {
+    // 不在锁定集：空 ID 样本，SafetyGate::targetReady 按身份不匹配拒绝。
+    return TargetGateSample{};
+  }
+  return TargetGateSample{it->second.id, it->second.valid, freshnessStamp(it->second)};
+}
+
+std::optional<CachedRefined> TargetCache::refinedSnapshot() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!refined_.valid) {
+    return std::nullopt;
+  }
+  return refined_;
+}
+
+QualitySnapshot TargetCache::qualitySnapshot() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  QualitySnapshot snapshot = quality_;
+  if (decision_committed_ && !modelExecutable(model_, clock_s_(), false)) {
+    snapshot.grasp_allowed = false;
+  }
+  if (unrefined_hold_) {
+    snapshot.data_age_s = 0.0;
+  } else if (model_generated_s_ > 0.0) {
+    snapshot.data_age_s = std::max(0.0, clock_s_() - model_generated_s_);
+  } else if (diagnostics_seen_) {
+    snapshot.data_age_s = std::max(0.0, clock_s_() - diagnostics_received_s_);
+  }
+  if (target_.valid && refined_.valid) {
+    // 退化向量按 -1（不可判）——原 axisAngleDeg 包装语义，统一进 angles.hpp（W5-7）。
+    snapshot.axis_angle_deg =
+      angleDeg(target_.initial_axis, refined_.axis, AngleDegenerate::Invalid, 1.0e-6);
+  } else {
+    snapshot.axis_angle_deg = -1.0;
+  }
+  return snapshot;
+}
+
+std::string TargetCache::graspDecisionTarget() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return grasp_decision_target_id_;
+}
+
+std::vector<Eigen::Vector3d> TargetCache::observedDirections() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return observed_directions_;
+}
+
+TargetGateSample TargetCache::targetGateSample() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return TargetGateSample{target_.id, target_.valid, freshnessStamp(target_)};
+}
+
+std::string TargetCache::expectedFittingTargetId() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return refined_.id.empty() ? target_.id : refined_.id;
+}
+
+bool TargetCache::waitForNewView(
+  std::size_t previous_views, double timeout_s, const std::atomic_bool & cancel) const
+{
+  std::unique_lock<std::mutex> lock(mutex_);
+  return cv_.wait_for(
+    lock, std::chrono::duration<double>(timeout_s),
+    [this, previous_views, &cancel]() {
+      return cancel.load() || quality_.captured_views > previous_views;
+    }) && !cancel.load();
+}
+
+bool TargetCache::waitForNewStation(
+  std::size_t previous_stations, double timeout_s,
+  const std::atomic_bool & cancel) const
+{
+  std::unique_lock<std::mutex> lock(mutex_);
+  return cv_.wait_for(
+    lock, std::chrono::duration<double>(timeout_s),
+    [this, previous_stations, &cancel]() {
+      return cancel.load() || observed_directions_.size() > previous_stations;
+    }) && !cancel.load();
+}
+
+bool TargetCache::waitForRefined(
+  const std::string & target_id, double timeout_s,
+  const std::atomic_bool & cancel) const
+{
+  std::unique_lock<std::mutex> lock(mutex_);
+  return cv_.wait_for(
+    lock, std::chrono::duration<double>(timeout_s),
+    [this, &target_id, &cancel]() {
+      // 谓词以锁存精化位姿有效且 ID 匹配为准：refined_.id/valid 仅由
+      // updateRefinedPose 写入；updateRefinedFitting 只写
+      // quality_.refined_target_id，单独到达不再满足谓词（旧路径会让随后的
+      // refinedSnapshot 为空 → 硬 FAILED 绕过降级链）。
+      return cancel.load() ||
+             (quality_.reconstruction_state == "READY" &&
+             refined_.valid && refined_.id == target_id);
+    }) && !cancel.load();
+}
+
+bool TargetCache::promoteUnrefinedGeometry(
+  const std::string & target_id, std::string * reject_reason, const ModelIdentity * expected)
+{
+  const auto set_reason = [reject_reason](const char * text) {
+      if (reject_reason != nullptr) {
+        *reject_reason = text;
+      }
+    };
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (target_id.empty()) {
+    set_reason("empty_target_id");
+    return false;
+  }
+  const CachedTarget * src = nullptr;
+  const auto locked = locked_targets_.find(target_id);
+  if (locked != locked_targets_.end() && locked->second.valid) {
+    src = &locked->second;
+  } else if (target_.id == target_id && target_.valid) {
+    src = &target_;
+  }
+  if (src == nullptr || !nonzeroFinite(src->initial_axis)) {
+    set_reason(src == nullptr ? "no_cached_anchor" : "invalid_initial_axis");
+    return false;
+  }
+  if (expected && (src->scene_epoch != expected->scene_epoch ||
+    src->harvest_run_id != expected->run_id))
+  {
+    set_reason("observation_scene_changed");
+    return false;
+  }
+  Eigen::Vector3d entry = src->initial_pose.translation();
+  if (!nonzeroFinite(entry) && nonzeroFinite(src->bottom)) {
+    entry = src->bottom - src->initial_axis.normalized() * 0.03;
+  }
+  if (!entry.allFinite()) {
+    return false;
+  }
+  // 本周期显式采用感知几何；不得让上一轮重建模型的身份/有效期参与本轮执行门。
+  model_ = ModelSnapshot();
+  decision_committed_ = false;
+  decision_revoked_ = false;
+  refined_ = CachedRefined();
+  refined_.id = target_id;
+  refined_.entry = entry;
+  refined_.bottom = src->bottom;
+  refined_.neck = src->neck;
+  refined_.axis = src->initial_axis.normalized();
+  // skip 档不沿用单帧 suggested_travel_m；置 0 让 insertionTravel 按
+  // (neck-entry)·axis - grasp.neck_margin_m 回退，再夹到执行行程范围。
+  // 全重建周期仍使用同一决策快照中明确给出的行程。
+  refined_.suggested_travel_m = 0.0;
+  refined_.bag_diameter_upper_m = src->bag_diameter_upper_m;
+  refined_.valid = nonzeroFinite(refined_.axis) && refined_.entry.allFinite();
+  if (!refined_.valid) {
+    refined_ = CachedRefined();
+    return false;
+  }
+  // 袋径相对刀内径只记录在 refined_.bag_diameter_upper_m。刀具常数未更新，
+  // 不在 unrefined 自授权链上拒绝。
+  (void)tool_d_inner_m_;
+  quality_.selected_target_id = target_id;
+  quality_.refined_target_id = target_id;
+  quality_.refined_accept = true;
+  quality_.reconstruction_target_id = target_id;
+  quality_.reconstruction_state = "READY";
+  quality_.data_age_s = 0.0;
+  quality_.grasp_allowed = true;
+  grasp_decision_target_id_ = target_id;
+  diagnostics_seen_ = false;
+  unrefined_hold_ = true;
+  model_generated_s_ = clock_s_();
+  cv_.notify_all();
+  return true;
+}
+
+void TargetCache::releaseUnrefinedGeometry()
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!unrefined_hold_) {
+    return;
+  }
+  unrefined_hold_ = false;
+  model_ = ModelSnapshot();
+  model_generated_s_ = 0.0;
+  refined_ = CachedRefined();
+  decision_committed_ = false;
+  decision_revoked_ = false;
+  grasp_decision_target_id_.clear();
+  quality_.refined_target_id.clear();
+  quality_.reconstruction_target_id.clear();
+  quality_.refined_accept = false;
+  quality_.grasp_allowed = false;
+  cv_.notify_all();
+}
+
+bool TargetCache::waitForFreshTarget(
+  double after_s, double timeout_s, const std::atomic_bool & cancel,
+  bool live_observation_required) const
+{
+  std::unique_lock<std::mutex> lock(mutex_);
+  return cv_.wait_for(
+    lock, std::chrono::duration<double>(timeout_s),
+    [this, after_s, &cancel, live_observation_required]() {
+      return cancel.load() ||
+             freshEnough(target_, after_s, live_observation_required);
+    }) && !cancel.load();
+}
+
+bool TargetCache::waitForFreshLockedTarget(
+  const std::string & target_id, double after_s, double timeout_s,
+  const std::atomic_bool & cancel, bool live_observation_required) const
+{
+  std::unique_lock<std::mutex> lock(mutex_);
+  return cv_.wait_for(
+    lock, std::chrono::duration<double>(timeout_s),
+    [this, &target_id, after_s, &cancel, live_observation_required]() {
+      const auto it = locked_targets_.find(target_id);
+      return cancel.load() ||
+             (it != locked_targets_.end() &&
+             freshEnough(it->second, after_s, live_observation_required));
+    }) && !cancel.load();
+}
+
+void TargetCache::notifyAll()
+{
+  cv_.notify_all();
+}
+
+}  // namespace peach_arm

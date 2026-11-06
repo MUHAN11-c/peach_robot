@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>peach_harvester</name>
+  <version>0.1.0</version>
+  <description>Peach harvest capability metapackage; no code, launch, config or model.</description>
+  <maintainer email="2155413529@qq.com">wjz</maintainer>
+  <license>BSD-3-Clause</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>peach_scene_perception</exec_depend>
+  <exec_depend>peach_target_reconstruction</exec_depend>
+  <exec_depend>peach_supervisor</exec_depend>
+  <exec_depend>peach_scene_obstacles</exec_depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,1535 @@
+// 功能：按模式分流的阶段执行器。主链阶段：观察、精化验证、再确认、
+// 预抓取验证、套入、刀具、原路撤退。不写账本、不调重建 Trigger。接触走
+// GraspTask；本文件编排刀具动作，SetIO 发送在 motion.cpp。阶段顺序见 executeCycle。
+#include "peach_arm/manipulation_skills_node.hpp"
+#include "peach_arm/math_utils.hpp"
+#include "peach_arm/pregrasp_level.hpp"
+#include "peach_arm/pregrasp_residual.hpp"
+#include "peach_arm/acm_policy.hpp"
+#include "peach_arm/grasp_geometry.hpp"
+#include "peach_arm/reconfirm_policy.hpp"
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+#include <peach_interfaces/msg/failure_code.hpp>
+#include <peach_interfaces/msg/peach_target_observation.hpp>
+#include <tf2_eigen/tf2_eigen.hpp>
+
+using namespace std::chrono_literals;
+
+namespace peach_arm
+{
+using FailureCode = peach_interfaces::msg::FailureCode;
+
+namespace
+{
+// 跟踪状态枚举 → 中文标签（再确认失败原因文案用；常量为
+// PeachTargetObservation.msg 的 tracking_status 枚举，255=缓存未知）。
+std::string trackingStatusLabel(uint8_t status)
+{
+  using Observation = peach_interfaces::msg::PeachTargetObservation;
+  switch (status) {
+    case Observation::OBSERVED:
+      return "OBSERVED";
+    case Observation::OCCLUDED:
+      return "OCCLUDED(遮挡)";
+    case Observation::LOST:
+      return "LOST(跟踪丢失)";
+    case Observation::INVALID:
+      return "INVALID";
+    case Observation::OUT_OF_VIEW:
+      return "OUT_OF_VIEW(出视野)";
+    case Observation::DEPTH_VOID:
+      return "DEPTH_VOID(深度空洞)";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+const char * motionStageName(MotionStage stage)
+{
+  switch (stage) {
+    case MotionStage::TRANSIT:
+      return "TRANSIT";
+    case MotionStage::PREGRASP:
+      return "PREGRASP";
+    case MotionStage::CONTACT:
+      return "CONTACT";
+    case MotionStage::TOOL:
+      return "TOOL";
+  }
+  return "TRANSIT";
+}
+}  // namespace
+// 数据快照薄壳：统一从 cache_ 取一致性快照，供阶段函数与运动接口使用。
+QualitySnapshot ManipulationSkillsNode::qualitySnapshot()
+{
+  return cache_.qualitySnapshot();
+}
+
+std::optional<CachedTarget> ManipulationSkillsNode::targetSnapshot()
+{
+  return cache_.targetSnapshot();
+}
+
+// 周期生效目标快照：所有带 target_id 的周期优先取该 ID 的锁定集锚点。
+// 为什么按周期分流而不是在执行接受时把 goal 目标写进 selected 缓存：
+// 覆盖 target_ 会污染感知驱动的四源调和（selected 身份/精化/决策缓存的 ID
+// 一致性全部以 target_ 为准），周期结束后还会留下"假 selected"干扰后续
+// 周期；而锁定集锚点缓存是独立数据源，goal 钉入 ID（ctx.target_id）在
+// 受理时已写好，执行体按"本周期生效目标"取快照即可，零侵入既有调和语义。
+// 未命中锁定锚点或 target_id 为空时回退 selected 缓存；调用方另核目标身份。
+std::optional<CachedTarget> ManipulationSkillsNode::cycleTargetSnapshot(
+  const std::string & target_id)
+{
+  if (!target_id.empty()) {
+    auto locked = cache_.lockedTargetSnapshot(target_id);
+    if (locked) {return locked;}
+  }
+  return cache_.targetSnapshot();
+}
+
+std::vector<Eigen::Vector3d> ManipulationSkillsNode::observedDirectionsSnapshot()
+{
+  return cache_.observedDirections();
+}
+
+std::optional<CachedRefined> ManipulationSkillsNode::refinedSnapshot()
+{
+  return cache_.refinedSnapshot();
+}
+
+std::string ManipulationSkillsNode::graspDecisionTargetSnapshot()
+{
+  return cache_.graspDecisionTarget();
+}
+
+bool ManipulationSkillsNode::waitForNewView(std::size_t previous_views)
+{
+  return cache_.waitForNewView(previous_views, effectiveFrameWaitS(), cancel_requested_);
+}
+
+bool ManipulationSkillsNode::waitForNewStation(std::size_t previous_stations)
+{
+  return cache_.waitForNewStation(
+    previous_stations, effectiveFrameWaitS(), cancel_requested_);
+}
+
+bool ManipulationSkillsNode::waitForFreshTarget(
+  const std::string & target_id, double after_s)
+{
+  return waitForFreshCycleTarget(target_id, after_s, effectiveFrameWaitS());
+}
+
+bool ManipulationSkillsNode::waitForFreshCycleTarget(
+  const std::string & target_id, double after_s, double window_s,
+  bool live_observation_required)
+{
+  // 数据源随周期生效目标走（同 cycleTargetSnapshot 的分流理由）：
+  // 带 target_id 时等该 ID 的锁定集锚点新鲜帧，空 ID 才等 selected 新鲜帧。
+  // live_observation_required=false 仅再确认：已 OBSERVED 则用当前锚点。
+  if (!target_id.empty()) {
+    return cache_.waitForFreshLockedTarget(
+      target_id, after_s, window_s, cancel_requested_,
+      live_observation_required);
+  }
+  return cache_.waitForFreshTarget(
+    after_s, window_s, cancel_requested_, live_observation_required);
+}
+
+bool ManipulationSkillsNode::waitForRefined(
+  const std::string & target_id, const ModelIdentity * expected)
+{
+  if (params_.quality.allow_unrefined_geometry) {
+    // 未精化锚点随观测流进缓存：感知在派发后的下一帧才标记 selected/锁定，
+    // 一次性判定会与派发竞态（09-29 真相机轮实锤：supervisor 派发 2ms 后
+    // 即判「无有效场景几何」，随后观测流带着非零锚点到达）。短窗轮询，
+    // 期间可取消；窗口后仍无锚点才落到精化等待（skip 模式下即失败收口）。
+    const double window_s = std::min(effectiveRefinedWaitS(), 3.0);
+    const auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration<double>(window_s);
+    std::string last_reject = "no_cached_anchor";
+    while (rclcpp::ok() && !cancel_requested_ && std::chrono::steady_clock::now() < deadline) {
+      std::string reject_reason;
+      if (cache_.promoteUnrefinedGeometry(target_id, &reject_reason, expected)) {
+        RCLCPP_WARN(
+          get_logger(),
+          "quality.allow_unrefined_geometry: 用场景观测几何代替重建精化 target=%s",
+          target_id.c_str());
+        return true;
+      }
+      if (!reject_reason.empty()) {
+        last_reject = reject_reason;
+      }
+      std::this_thread::sleep_for(100ms);
+    }
+    RCLCPP_WARN(
+      get_logger(),
+      "quality.allow_unrefined_geometry 但 %.1fs 内无有效场景几何 target=%s"
+      "（拒因=%s）",
+      window_s, target_id.c_str(), last_reject.c_str());
+    if (expected) {return false;}
+  }
+  return cache_.waitForRefined(target_id, effectiveRefinedWaitS(), cancel_requested_);
+}
+
+bool ManipulationSkillsNode::failStage(CycleContext & ctx, const std::string & reason)
+{
+  ctx.failure_reason = reason;
+  RCLCPP_WARN(
+    contactLogger(),
+    "failure_code=%u target=%s reason=%s",
+    static_cast<unsigned>(ctx.failure_code),
+    ctx.target_id.c_str(), reason.c_str());
+  setState(CycleState::FAILED, reason, ctx.target_id);
+  return false;
+}
+
+bool ManipulationSkillsNode::failStage(
+  CycleContext & ctx, uint8_t outcome, uint32_t failure_code,
+  const std::string & reason)
+{
+  pending_outcome_.store(outcome);
+  ctx.failure_code = failure_code;
+  return failStage(ctx, reason);
+}
+
+bool ManipulationSkillsNode::failStage(
+  CycleContext & ctx, uint32_t failure_code, const std::string & reason)
+{
+  // W5-9：调用方已按语义分级（或保持 FAILED 默认）的失败点只补失败码。
+  ctx.failure_code = failure_code;
+  return failStage(ctx, reason);
+}
+
+// ViewContext 组装单点（W5-11：原 stagePrepareCycle 与扫描环两份重复合一）。
+// target=当前生效目标快照（扫描环按最新锚点、越权回退周期目标），
+// camera_position=当前相机位置（base 系），target_id=锁定集邻居排除键。
+ViewContext ManipulationSkillsNode::makeViewContext(
+  const CachedTarget & target, const Eigen::Vector3d & camera_position,
+  const std::string & target_id)
+{
+  ViewContext context;
+  context.target = target.center;
+  context.current_camera_position = camera_position;
+  context.observed_directions = observedDirectionsSnapshot();
+  context.bbox_valid = target.bbox_valid;
+  context.bbox_x = target.bbox_x;
+  context.bbox_y = target.bbox_y;
+  context.bbox_w = target.bbox_w;
+  context.bbox_h = target.bbox_h;
+  context.image_width = target.image_width;
+  context.image_height = target.image_height;
+  context.neighbor_centers = cache_.lockedNeighborCenters(target_id);
+  context.foreground_ratio = target.foreground_ratio;
+  return context;
+}
+
+Eigen::Isometry3d ManipulationSkillsNode::entryToolPose(
+  const Eigen::Vector3d & entry, const Eigen::Vector3d & axis,
+  const Eigen::Vector3d & preferred_x)
+{
+  Eigen::Isometry3d entry_tool_pose = Eigen::Isometry3d::Identity();
+  entry_tool_pose.translation() = entry;
+  const auto current_tool = motion_->lookupTransform(params_.frames.base, params_.frames.tool);
+  entry_tool_pose.linear() = current_tool ?
+    alignFrameZ(current_tool->linear(), axis) :
+    ViewPlanner::toolOrientation(axis, preferred_x);
+  return entry_tool_pose;
+}
+
+bool ManipulationSkillsNode::contactEntryGeometry(
+  const CachedRefined & refined, const Eigen::Isometry3d & initial_pose,
+  Eigen::Isometry3d & entry_tip_pose, double & travel_m, std::string & error,
+  bool require_cut_travel)
+{
+  const Eigen::Isometry3d entry_tool_pose = entryToolPose(
+    refined.entry, refined.axis, initial_pose.linear().col(0));
+  const auto tip_from_tool = motion_->lookupTransform(params_.frames.tip, params_.frames.tool);
+  if (!tip_from_tool) {
+    error = "无法取得 tip 到 tool 的变换";
+    return false;
+  }
+  entry_tip_pose = entry_tool_pose * tip_from_tool->inverse();
+  travel_m = insertionTravel(refined);
+  if (require_cut_travel && (!std::isfinite(travel_m) || travel_m <= 0.0)) {
+    error = "剪切参考行程超出执行范围";
+    return false;
+  }
+  return true;
+}
+
+// 授权矩阵（cycle_support.hpp）的失败包装：令牌/许可过期（StageDenial::
+// EXPIRED，M3c——可重派：重建后令牌换新即可再执行）与 GraspDecision 复检
+// 未通过沿用 skipped_quality 语义（质量原因跳过，编排器可重派）；其余拒绝
+// （权限/安全/取消/使能/许可明确不允许）按 FAILED 分级。
+bool ManipulationSkillsNode::requireStageAuthority(
+  CycleContext & ctx, MotionStage stage, const std::string & label)
+{
+  std::string why;
+  StageDenial denial = StageDenial::DENIED;
+  if (authorizeStage(ctx, stage, why, denial)) {
+    return true;
+  }
+  const bool decision_recheck_failed =
+    (stage == MotionStage::CONTACT || stage == MotionStage::TOOL) &&
+    (graspDecisionTargetSnapshot() != ctx.target_id ||
+    !qualitySnapshot().grasp_allowed);
+  pending_outcome_.store(
+    stageDenialOutcome(denial, decision_recheck_failed));
+  return failStage(
+    ctx, label + "被拒绝（" + motionStageName(stage) + "）: " + why);
+}
+
+
+// 阶段顺序：Prepare →（execution 关则 PlanPreview；否则按 skip_observation
+// 决定 AcquireViews）→ Finalize →（ObserveOnly / ReportReady 短路；否则
+// Reconfirm → MovePregrasp → VerifyPregrasp →（HoldPregrasp 或
+// PlanSleeve → Sleeve → Cutter → VerifyCut → Retreat → ReturnPhoto →
+// ReleasePayload → VerifyHarvest）→ CompleteTarget）。失败立即进入统一终局。
+void ManipulationSkillsNode::executeCycle(CycleContext & ctx)
+{
+  const auto finish = [this, &ctx](CycleState state, const std::string & message) {
+      execution_armed_.store(false);
+      cache_.releaseUnrefinedGeometry();
+      // 先落终态再解除 running：executeAction 以 running==false 作为周期结束信号，
+      // 这样它读到的状态一定是终态而不是上一个中间态。
+      setState(state, message, ctx.target_id);
+      running_.store(false);
+      publishState();
+    };
+  ctx.failure_reason.clear();
+  ctx.terminal_state = CycleState::SUCCEEDED;
+  ctx.terminal_message = "周期完成";
+  bool ok = false;
+  try {
+    ok = stagePrepareCycle(ctx);
+    if (ok && !execution_enabled_.load()) {
+      // PREVIEW 分支（终结，绝不运动）：只规划候选观察位姿。
+      ok = stagePlanPreview(ctx);
+    } else if (ok) {
+      if (!ctx.skip_observation) {
+        ok = stageAcquireViews(ctx);
+      }
+      if (ok) {
+        ok = stageFinalizeAndValidate(ctx);
+        if (ok) {
+          if (ctx.observe_only) {
+            stageReportObserveOnly(ctx);
+          } else if (!grasp_enabled_.load()) {
+            stageReportReady(ctx);
+          } else {
+            ok = stageReconfirmTarget(ctx);
+            if (ok) {ok = stageMovePregrasp(ctx);}
+            if (ok) {ok = stageVerifyPregrasp(ctx);}
+            if (ok) {
+              if (ctx.pregrasp_only) {
+                stageHoldPregrasp(ctx);
+              } else {
+                ok = stagePlanSleeveAndReverseRetreat(ctx);
+                if (ok) {ok = stageSleeveLinear(ctx);}
+                if (ok) {ok = stageActuateCutter(ctx);}
+                if (ok) {ok = stageVerifyCut(ctx);}
+                if (ok) {ok = stageExecuteReservedReverseRetreat(ctx);}
+                if (ok) {ok = stageReturnHarvestStow(ctx);}
+                if (ok) {ok = stageReleasePayload(ctx);}
+                if (ok) {ok = stageVerifyHarvestOutcome(ctx);}
+              }
+              if (ok) {stageCompleteTarget(ctx);}
+            }
+          }
+        }
+      }
+    }
+    // 终局分级（顺序即语义）：接触 recovery > 取消 > 成功 > 失败。
+    // PREGRASP_ONLY 到位也置 recovery（ACK 前不 Survey），但可为周期成功：
+    // 不得改写成「接触取消/撤离未确认」再 abort 成 FAILED。
+    if (contact_recovery_required_.load() && !(ctx.pregrasp_only && ok)) {
+      const std::string recovery = "保持停止，须现场人工撤离后确认恢复";
+      finish(
+        CycleState::RECOVERY_REQUIRED,
+        (ctx.failure_reason.empty() ? "接触阶段取消或撤离未确认" : ctx.failure_reason) +
+        "；" + recovery);
+    } else if (cancel_requested_.load()) {
+      finish(CycleState::CANCELED, "用户取消主动视觉/MTC 周期");
+    } else if (ok) {
+      finish(ctx.terminal_state, ctx.terminal_message);
+    } else {
+      finish(
+        CycleState::FAILED,
+        ctx.failure_reason.empty() ? "执行器返回 FAILURE" : ctx.failure_reason);
+    }
+  } catch (const std::exception & error) {
+    if (contact_recovery_required_.load()) {
+      finish(
+        CycleState::RECOVERY_REQUIRED,
+        std::string("接触阶段异常，须现场人工撤离: ") + error.what());
+    } else {
+      finish(CycleState::FAILED, std::string("周期执行异常: ") + error.what());
+    }
+  }
+}
+
+bool ManipulationSkillsNode::stagePrepareCycle(CycleContext & ctx)
+{
+  // 周期上下文优先锚定 goal 目标的锁定集缓存，缺失才回退 selected。
+  ctx.target = cycleTargetSnapshot(ctx.target_id);
+  ctx.refined.reset();
+  ctx.candidates.clear();
+  // TOOL IO 授权快照随周期重置：防上一目标的令牌/verified 残留越周期。
+  tool_authority_ctx_ = CycleContext{};
+  ctx.pregrasp_verified = false;
+  ctx.sleeve_planned = false;
+  ctx.cut_command_accepted = false;
+  ctx.cut_confirmed = false;
+  ctx.retreat_confirmed = false;
+  ctx.completion_level = 0;
+  ctx.failure_code = FailureCode::NONE;
+  ctx.pregrasp_msg = peach_interfaces::msg::PregraspVerification();
+  ctx.contact_transaction_id = ctx.target_id + ":contact";
+  tool_actuator_.resetSafe();
+  if (!ctx.target) {
+    return failStage(
+      ctx, FailureCode::OBSERVE_FAILED,
+      "周期目标（selected/锁定集锚点）在启动后失效");
+  }
+  // goal 钉死校验：锁定集命中时身份由缓存键保证；回退 selected 后仍须
+  // 等于 goal.target_id，不能借受理后的 selected 切换执行另一目标。
+  // 空目标的内部调用才采纳当下快照身份。
+  if (!ctx.target_id.empty() && ctx.target->id != ctx.target_id) {
+    return failStage(
+      ctx, FailureCode::MODEL_STALE,
+      "目标身份变更: goal=" + ctx.target_id +
+      " 当前 selected=" + ctx.target->id);
+  }
+  ctx.target_id = ctx.target->id;
+  if (!ctx.observe_only && ctx.requested_model.scene_epoch != ctx.target->scene_epoch) {
+    return failStage(
+      ctx, ExecuteTarget::Result::SKIPPED_QUALITY, FailureCode::MODEL_STALE,
+      "goal_scene_epoch_mismatch");
+  }
+  // action.run_id 属于调度批次；GraspDecision.run_id 属于感知锁定轮。
+  ctx.requested_model.run_id = ctx.target->harvest_run_id;
+  // 接触段日志上下文（P0 观测性）：GraspTask 内部日志自此可归属到目标
+  grasp_task_->setTargetContext(ctx.target_id);
+  setState(CycleState::PLAN_OBSERVATION, "生成目标导向主动视点", ctx.target_id);
+  const auto base_from_camera = motion_->lookupTransform(params_.frames.base,
+      params_.frames.camera);
+  if (!base_from_camera) {
+    return failStage(
+      ctx, FailureCode::EXACT_TF_MISSING, "无法取得当前相机位姿");
+  }
+  ctx.candidates = view_planner_->generate(
+    makeViewContext(*ctx.target, base_from_camera->translation(), ctx.target_id));
+  publishViewMarkers(ctx.target->center, {});
+  if (ctx.candidates.empty()) {
+    return failStage(
+      ctx, FailureCode::OBSERVE_FAILED, "没有生成可用观察视点");
+  }
+  return true;
+}
+
+bool ManipulationSkillsNode::stagePlanPreview(CycleContext & ctx)
+{
+  // OBSERVE_ONLY 必须真走臂采多视角；plan-only 不得伪装成观察成功。
+  if (ctx.observe_only) {
+    pending_outcome_.store(ExecuteTarget::Result::SKIPPED_QUALITY);
+    return failStage(
+      ctx,
+      "observe_only 需要 execution.enabled=true 才能采多视角；当前为只规划预览");
+  }
+  // plan-only 结构性只规划：execute=false 恒不发送运动。
+  for (const auto & candidate : ctx.candidates) {
+    if (motion_->planOrMoveCamera(
+        candidate.camera_pose, "LIN", false, candidate.label, false))
+    {
+      ctx.terminal_state = CycleState::PLAN_READY;
+      ctx.terminal_message = "只规划预览成功；未发送任何运动";
+      return true;
+    }
+  }
+  pending_outcome_.store(ExecuteTarget::Result::SKIPPED_UNREACHABLE);
+  return failStage(
+      ctx, FailureCode::OBSERVE_FAILED, "所有候选观察位姿均不可规划");
+}
+
+bool ManipulationSkillsNode::stageAcquireViews(CycleContext & ctx)
+{
+  // plan-only 防御断言：PREVIEW 分支在 executeCycle 已分流，本阶段不可达
+  // plan-only（结构性保证）；仍直接失败，绝不扫描执行。
+  if (!execution_enabled_.load()) {
+    return failStage(ctx, "plan-only 分支进入观察段（结构性防御，直接失败）");
+  }
+  // 观察移动授权（TRANSIT 级）：单点判定取代散落的裸使能检查；
+  // 逐次执行前运动接口安全门（Active ∧ robotReady）仍逐 move 复核。
+  if (!requireStageAuthority(ctx, MotionStage::TRANSIT, "观察段移动")) {
+    return false;
+  }
+  // 扫描停准则（判定纯核 ScanBudget，对齐 Open3D TSDF / NBV）：
+  //   - 质量门放行即停，不为凑次数继续运动；
+  //   - 否则把 maximum_moves 走完（当前位已采帧；短移补基线）；
+  //   - 等帧超时在 waitFor*；时长预算/移动成本 EMA 预测收口已随死分支
+  //     删除（W5-12），不参与停准则。
+  const ScanBudget scan_budget(ScanBudgetConfig{
+      static_cast<int>(params_.scan.maximum_moves)});
+  int moves = 0;
+  int effective_views = 0;
+  std::vector<std::string> attempted;
+  const double scan_start_s = now().seconds();
+  setState(CycleState::WAIT_FRAME, "当前位采帧，不环绕", ctx.target_id);
+  {
+    const std::size_t before_stay = qualitySnapshot().captured_views;
+    if (waitForFreshTarget(ctx.target_id, scan_start_s) &&
+      waitForNewView(before_stay))
+    {
+      RCLCPP_INFO(
+        get_logger(),
+        "当前位已采重建帧，不环绕；基线未过再做最多两次最近短移");
+    } else {
+      RCLCPP_WARN(get_logger(), "当前位采帧未完成，将做一次短 PTP 接近");
+    }
+  }
+  while (!cancel_requested_.load()) {
+    const GateResult finalize_gate = quality_gate_->readyToFinalize(qualitySnapshot());
+    const ScanVerdict verdict = scan_budget.poll(finalize_gate.allowed, moves);
+    if (verdict == ScanVerdict::CONVERGED) {
+      break;
+    }
+    if (verdict == ScanVerdict::MOVES_EXHAUSTED) {
+      break;
+    }
+    const auto current_camera = motion_->lookupTransform(params_.frames.base,
+        params_.frames.camera);
+    if (!current_camera) {
+      return failStage(
+      ctx, FailureCode::EXACT_TF_MISSING, "扫描中无法取得相机位姿");
+    }
+    // 每次规划前用缓存中的最新观测锚点：跨视角锚点偏差在近距获得观测后
+    // 自动纠偏，避免按拍照位姿的旧锚点把目标指到画面外（stale 主因）。
+    // OBSERVE_ONLY 周期取 goal 目标的锁定集锚点（见 cycleTargetSnapshot）。
+    const auto latest_target = cycleTargetSnapshot(ctx.target_id);
+    const bool latest_valid = latest_target && latest_target->id == ctx.target_id;
+    const CachedTarget & view_target = latest_valid ? *latest_target : *ctx.target;
+    const Eigen::Vector3d scan_center = view_target.center;
+    ctx.candidates = view_planner_->generate(
+      makeViewContext(view_target, current_camera->translation(), ctx.target_id));
+    bool moved = false;
+    for (const auto & candidate : ctx.candidates) {
+      if (std::find(attempted.begin(), attempted.end(), candidate.label) != attempted.end()) {
+        continue;
+      }
+      attempted.push_back(candidate.label);
+      std::string target_reason;
+      if (!cycleTargetReady(ctx.target_id, target_reason)) {
+        const bool stale = target_reason == "selected_target_stale";
+        // 短暂闪烁/遮挡：等一个新鲜帧窗口后复核，恢复则继续扫描
+        const bool recovered = stale && moves > 0 &&
+          waitForFreshTarget(ctx.target_id, now().seconds()) &&
+          cycleTargetReady(ctx.target_id, target_reason);
+        if (recovered) {
+          RCLCPP_INFO(get_logger(), "目标观测短暂丢失后已恢复，继续扫描");
+        }
+        if (stale && moves == 0) {
+          // 周期起步目标即 stale（残局视角暂不可见）：凭记忆锚点做获取性
+          // 移动，到位后由 waitForFreshTarget 判定是否重新可见
+          RCLCPP_INFO(get_logger(), "目标观测暂陈旧，凭记忆锚点执行获取性移动");
+        } else if (!recovered) {
+          return failStage(
+          ctx, FailureCode::OBSERVE_FAILED,
+          "目标身份/可见性安全门失败: " + target_reason);
+        }
+      }
+      setState(
+        CycleState::MOVE_TO_VIEW,
+        candidate.label + " score=" + std::to_string(candidate.score) +
+        " travel=" + std::to_string(candidate.travel_m) + "m",
+        ctx.target_id);
+      // 观察走最近直线：只 Pilz LIN，失败换下一候选；禁止 PTP/OMPL 绕行。
+      const std::string planner = "LIN";
+      // 移动前记下机位数：到位后同机位连帧不加机位，必须比移动前多一个。
+      const std::size_t stations_before_move = observedDirectionsSnapshot().size();
+      // 移动成本计时起点：含规划+执行+到位后等帧（预算估计的实测输入）。
+      const double move_start_s = now().seconds();
+      if (!motion_->planOrMoveCamera(
+          candidate.camera_pose, planner, true, candidate.label, false))
+      {
+        continue;
+      }
+      publishViewMarkers(scan_center, {candidate});
+      ++moves;
+      moved = true;
+      // 先等到位后的新鲜目标观测：移动中途被重建接受的帧会让 waitForNewView
+      // 立即返回，而感知有效样本仍是移动前的旧帧，直接复核安全门必然 stale
+      // （0.78FPS 下到位后首帧约 1.3s 才到，6s 窗口约等 4-5 帧）。
+      const double move_done_s = now().seconds();
+      setState(CycleState::WAIT_FRAME, "等待到位后新鲜目标观测与重建帧", ctx.target_id);
+      if (!waitForFreshTarget(ctx.target_id, move_done_s)) {
+        // 无新鲜目标观测则本视点必无有效掩膜帧，不再等重建成帧，直接换视点；
+        // 本次移动不计有效视点、不进成本 EMA（失败样本会带偏预算估计）。
+        RCLCPP_WARN(get_logger(), "视点到达但等待新鲜目标观测超时，换下一视点");
+        break;
+      }
+      // 停走采帧（温室多视：到位静止后再积分）。同机位连帧会加 captured_views
+      // 但不加机位；等 view_directions 相对移动前增加，避免 60ms 内收口丢掉下一颗。
+      if (!waitForNewStation(stations_before_move)) {
+        RCLCPP_WARN(get_logger(), "视点到达但未形成新机位，换下一视点");
+        break;
+      }
+      ++effective_views;
+      (void)move_start_s;  // 移动起点仅过程对照（成本 EMA 已随死分支删除）
+      break;
+    }
+    if (!moved) {
+      // 候选穷尽：质量门已放行时直接收口 finalize（有效视点下限防的是"没看
+      // 够就收"，质量达标说明既有覆盖足够）；未放行才按目标不可达跳过。
+      if (finalize_gate.allowed) {
+        break;
+      }
+      // 视角规划不可达：批次侧可按 SKIPPED_UNREACHABLE 直接跳过该目标。
+      pending_outcome_.store(ExecuteTarget::Result::SKIPPED_UNREACHABLE);
+      return failStage(
+      ctx, FailureCode::OBSERVE_FAILED, "剩余候选视点均不可达或规划失败");
+    }
+  }
+  if (cancel_requested_.load()) {
+    return false;
+  }
+  const GateResult gate = quality_gate_->readyToFinalize(qualitySnapshot());
+  if (!gate.allowed) {
+    // 移动次数上限内采集帧不足/不收敛（含有效视点未达下限）：按目标不可达跳过。
+    pending_outcome_.store(ExecuteTarget::Result::SKIPPED_UNREACHABLE);
+    return failStage(
+      ctx, FailureCode::OBSERVE_FAILED,
+      "达到扫描上限仍未收敛（有效视点 " + std::to_string(effective_views) +
+      "/" + std::to_string(params_.scan.min_effective_views) + "）: " + gate.reason);
+  }
+  return true;
+}
+
+bool ManipulationSkillsNode::stageFinalizeAndValidate(CycleContext & ctx)
+{
+  setState(CycleState::FINALIZE, "等待重建精化几何（BuildTargetModel）", ctx.target_id);
+  const double wait_s = effectiveRefinedWaitS();
+  const auto wait_started = std::chrono::steady_clock::now();
+  auto waitElapsedS = [&wait_started]() {
+      return std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - wait_started).count();
+    };
+  bool refined_arrived = false;
+  std::optional<DecisionSnapshot> decision;
+  if (ctx.observe_only) {
+    RCLCPP_INFO(
+      cycleLogger(),
+      "[FINALIZE] 观察周期等精化几何 timeout=%.1fs target=%s rec_state=%s",
+      wait_s, ctx.target_id.c_str(),
+      qualitySnapshot().reconstruction_state.c_str());
+    refined_arrived = waitForRefined(ctx.target_id);
+    if (!refined_arrived) {
+      pending_outcome_.store(ExecuteTarget::Result::SKIPPED_QUALITY);
+      return failStage(
+        ctx, FailureCode::BUILD_FAILED,
+        "observe_only 未等到绑定目标的 TSDF/精化几何: " + ctx.target_id +
+        " elapsed=" + std::to_string(waitElapsedS()) + "s");
+    }
+    RCLCPP_INFO(
+      cycleLogger(),
+      "[FINALIZE] 精化几何已到 elapsed=%.2fs", waitElapsedS());
+    return true;
+  }
+  // 非观察周期：GraspDecision 提交时已写入精化几何。先等决策，避免
+  // waitForRefined 先超时把 refined_arrived 钉成 false，随后决策到达仍
+  // 因该布尔合取跳过、臂完全不动（2026-10-16 真实相机+mock：轮 8/9）。
+  const auto & expected = ctx.requested_model;
+  const bool unrefined = params_.quality.allow_unrefined_geometry &&
+    expected.model_revision == "unrefined:" + std::to_string(expected.scene_epoch) + ":" +
+    expected.target_id && expected.calibration_revision == "unrefined" &&
+    expected.config_revision == "unrefined";
+  if (!unrefined) {
+    RCLCPP_INFO(
+      cycleLogger(),
+      "[FINALIZE] 等 GraspDecision（含精化几何）timeout=%.1fs target=%s rec_state=%s",
+      wait_s, ctx.target_id.c_str(),
+      qualitySnapshot().reconstruction_state.c_str());
+    decision = cache_.waitForDecision(ctx.requested_model, wait_s, cancel_requested_);
+    if (!decision) {
+      return failStage(
+        ctx, ExecuteTarget::Result::SKIPPED_QUALITY, FailureCode::DECISION_REJECTED,
+        "decision_snapshot_unavailable: 同目标模型与许可未在时限内到齐或已过期"
+        " elapsed=" + std::to_string(waitElapsedS()) + "s timeout=" +
+        std::to_string(wait_s) + "s");
+    }
+  } else {
+    RCLCPP_INFO(
+      cycleLogger(),
+      "[FINALIZE] allow_unrefined：等精化几何 timeout=%.1fs target=%s",
+      wait_s, ctx.target_id.c_str());
+    refined_arrived = waitForRefined(ctx.target_id, &expected);
+    RCLCPP_INFO(
+      cycleLogger(),
+      "[FINALIZE] 精化等待结束 arrived=%s elapsed=%.2fs",
+      refined_arrived ? "true" : "false", waitElapsedS());
+    if (!refined_arrived) {
+      return failStage(
+        ctx, ExecuteTarget::Result::SKIPPED_QUALITY, FailureCode::MODEL_STALE,
+        "unrefined_observation_unavailable");
+    }
+  }
+  if (decision) {
+    refined_arrived = refined_arrived || decision->geometry.valid;
+    RCLCPP_INFO(
+      cycleLogger(),
+      "[FINALIZE] GraspDecision 已到 elapsed=%.2fs geometry_valid=%s "
+      "decision_target=%s",
+      waitElapsedS(),
+      decision->geometry.valid ? "true" : "false",
+      graspDecisionTargetSnapshot().c_str());
+  }
+  QualitySnapshot snapshot = decision ? decision->quality : qualitySnapshot();
+  // skip_observation：编排已钉死 goal.target_id（锁定集），感知 selected
+  // 心跳可能尚未跟上。质量门用 selected 字段当身份，空 selected 会把已
+  // ACCEPT 的精化打成 selected_target_missing（reconstruct_in_trajectory）。
+  // 决策快照已带几何时也回填 refined_target_id，不再依赖 waitForRefined 布尔。
+  if (ctx.skip_observation && !ctx.target_id.empty()) {
+    if (snapshot.selected_target_id.empty()) {
+      snapshot.selected_target_id = ctx.target_id;
+    }
+    if (snapshot.reconstruction_target_id.empty()) {
+      snapshot.reconstruction_target_id = ctx.target_id;
+    }
+    if (snapshot.refined_target_id.empty() &&
+      (refined_arrived || (decision && decision->geometry.valid)))
+    {
+      snapshot.refined_target_id = ctx.target_id;
+    }
+  }
+  // FULL also starts with a pregrasp approach. CONTACT/TOOL authorization
+  // stays at those stages; a cutting denial must not veto pregrasp geometry.
+  const GateResult gate = quality_gate_->readyToApproach(snapshot);
+  if (!gate.allowed) {
+    RCLCPP_WARN(
+      contactLogger(),
+      "[FINALIZE] 质量门拒绝 gate=%s axis_angle_deg=%.2f pregrasp_only=%s "
+      "rec_state=%s rec_id=%s refined_id=%s views=%zu",
+      gate.reason.c_str(), snapshot.axis_angle_deg,
+      ctx.pregrasp_only ? "true" : "false",
+      snapshot.reconstruction_state.c_str(),
+      snapshot.reconstruction_target_id.c_str(),
+      snapshot.refined_target_id.c_str(),
+      snapshot.station_count > 0 ? snapshot.station_count : snapshot.captured_views);
+  }
+  const bool geometry_ready = refined_arrived ||
+    (decision && decision->geometry.valid) || refinedSnapshot().has_value();
+  const std::string decision_target = graspDecisionTargetSnapshot();
+  const bool decision_target_ok =
+    ctx.pregrasp_only || decision_target == ctx.target_id;
+  const bool grasp_ready = geometry_ready && gate.allowed && decision_target_ok;
+  RCLCPP_INFO(
+    cycleLogger(),
+    "[FINALIZE] 合取 geometry_ready=%s gate.allowed=%s(%s) "
+    "decision_target_ok=%s pregrasp_only=%s ctx=%s decision_target=%s "
+    "rec_state=%s rec_id=%s refined_id=%s",
+    geometry_ready ? "true" : "false",
+    gate.allowed ? "true" : "false", gate.reason.c_str(),
+    decision_target_ok ? "true" : "false",
+    ctx.pregrasp_only ? "true" : "false",
+    ctx.target_id.c_str(), decision_target.c_str(),
+    snapshot.reconstruction_state.c_str(),
+    snapshot.reconstruction_target_id.c_str(),
+    snapshot.refined_target_id.c_str());
+  const auto tip_from_tool = motion_->lookupTransform(params_.frames.tip, params_.frames.tool);
+  if (!tip_from_tool) {
+    return failStage(
+      ctx, FailureCode::EXACT_TF_MISSING, "无法取得 tip 到 tool 的变换");
+  }
+  if (grasp_ready) {
+    if (decision && decision->geometry.valid) {
+      ctx.refined = decision->geometry;
+    } else {
+      ctx.refined = refinedSnapshot();
+    }
+    if (decision) {
+      ctx.bound_model = decision->model.identity;
+    }
+    if (!ctx.refined) {
+      return failStage(
+      ctx, FailureCode::BUILD_FAILED, "精化位姿数据不存在");
+    }
+    // 再确认漂移判定必须和后续新鲜观测用同一套锚点定义（感知底/颈中点）。
+    // 若拿 TSDF 中点去比单帧检测中点，现场曾把 ~5cm 的定义差当成果实移动，
+    // 再把精化入口整包平移，直线插入在错误位置走不完。
+    const auto live_anchor = cycleTargetSnapshot(ctx.target_id);
+    ctx.reference_anchor = (live_anchor && live_anchor->valid) ?
+      live_anchor->center :
+      0.5 * (ctx.refined->bottom + ctx.refined->neck);
+    const Eigen::Isometry3d entry_tool_pose = entryToolPose(
+      ctx.refined->entry, ctx.refined->axis,
+      ctx.target->initial_pose.linear().col(0));
+    ctx.entry_tip_pose = entry_tool_pose * tip_from_tool->inverse();
+    ctx.travel_m = insertionTravel(*ctx.refined);
+    if (!ctx.pregrasp_only && (!std::isfinite(ctx.travel_m) || ctx.travel_m <= 0.0)) {
+      return failStage(
+        ctx, ExecuteTarget::Result::SKIPPED_QUALITY,
+        FailureCode::DECISION_REJECTED, "剪切参考行程超出执行范围");
+    }
+    // Selection used the provisional perception geometry. Recheck the
+    // actual reconstructed entry and cut travel before moving from photo pose.
+    auto request = std::make_shared<CheckReachability::Request>();
+    geometry_msgs::msg::PoseStamped entry;
+    entry.header.frame_id = params_.frames.base;
+    entry.pose = tf2::toMsg(ctx.entry_tip_pose);
+    request->tcp_poses.push_back(entry);
+    request->suggested_travel_m.push_back(ctx.travel_m);
+    request->require_sleeve = !ctx.pregrasp_only;
+    request->timeout_s = 0.2;
+    auto response = std::make_shared<CheckReachability::Response>();
+    evaluateReachability(request, response);
+    const bool reachable =
+      !response->reachable.empty() && response->reachable.front();
+    std::string code = "reachability_unavailable";
+    if (!response->error_codes.empty()) {
+      code = response->error_codes.front().empty() ?
+        "ok" : response->error_codes.front();
+    }
+    RCLCPP_INFO(
+      contactLogger(),
+      "caller=FINALIZE target=%s travel=%.3fm require_sleeve=%d "
+      "reachable=%s code=%s",
+      ctx.target_id.c_str(), ctx.travel_m,
+      static_cast<int>(request->require_sleeve),
+      reachable ? "true" : "false", code.c_str());
+    if (!reachable) {
+      return failStage(
+        ctx, ExecuteTarget::Result::SKIPPED_UNREACHABLE,
+        FailureCode::SLEEVE_PLAN_FAILED, "精化几何可达性未通过: " + code);
+    }
+    const auto quality = qualitySnapshot();
+    RCLCPP_INFO(
+      get_logger(),
+      "接触几何（核对方向） target=%s entry=[%.3f %.3f %.3f] axis=[%.3f %.3f %.3f] "
+      "travel=%.3fm axis_angle_deg=%.2f",
+      ctx.target_id.c_str(),
+      ctx.refined->entry.x(), ctx.refined->entry.y(), ctx.refined->entry.z(),
+      ctx.refined->axis.x(), ctx.refined->axis.y(), ctx.refined->axis.z(),
+      ctx.travel_m, quality.axis_angle_deg);
+    if (grasp_hyp_pub_) {
+      peach_interfaces::msg::GraspHypothesis hyp;
+      hyp.header.stamp = now();
+      hyp.header.frame_id = params_.frames.base;
+      hyp.target_id = ctx.target_id;
+      hyp.entry_pose = tf2::toMsg(ctx.entry_tip_pose);
+      hyp.travel_m = static_cast<float>(ctx.travel_m);
+      hyp.rank_score = 1.0f;
+      grasp_hyp_pub_->publish(hyp);
+    }
+    return true;
+  }
+  std::string why;
+  if (!geometry_ready) {
+    why += "geometry_missing";
+  }
+  if (!gate.allowed) {
+    if (!why.empty()) {
+      why += "; ";
+    }
+    why += "gate=" + gate.reason;
+  }
+  if (!decision_target_ok) {
+    if (!why.empty()) {
+      why += "; ";
+    }
+    why += "decision_target=" + decision_target + " ctx=" + ctx.target_id;
+  }
+  if (why.empty()) {
+    why = "unknown_conjunct";
+  }
+  return failStage(
+    ctx, ExecuteTarget::Result::SKIPPED_QUALITY,
+    FailureCode::DEGRADED_CONTACT_FORBIDDEN,
+    (ctx.pregrasp_only ? "预抓取未就绪: " : "接近未就绪: ") + why);
+}
+
+bool ManipulationSkillsNode::stageReconfirmTarget(CycleContext & ctx)
+{
+  // 抓取前再确认（2.7-RECONFIRM）：FinalizeAndValidate 已产出入口几何
+  // （ctx.refined/entry_tip_pose/travel_m，周期"黑板"字段），但 finalize 耗时
+  // 必然超过观测新鲜度窗口，接触段前必须用最新观测复核目标没飘走、没换
+  // 身份、没在风里持续摆动，再决定放行接触。
+  //
+  // 回退开关（验证期遗留）：allow_stale_anchor=true 时退化为旧"按静态锚点
+  // 继续"行为，直接放行；false（默认）时新鲜度由本阶段单点把关。
+  if (params_.grasp.allow_stale_anchor) {
+    RCLCPP_WARN(
+      get_logger(),
+      "grasp.allow_stale_anchor=true：跳过抓取前再确认，按静态目标锚点继续"
+      "（旧行为，验证期遗留）");
+    return true;
+  }
+  if (!ctx.refined || !ctx.refined->valid) {
+    pending_outcome_.store(ExecuteTarget::Result::SKIPPED_QUALITY);
+    return failStage(
+      ctx, FailureCode::DEGRADED_CONTACT_FORBIDDEN,
+      "再确认无有效入口几何（FinalizeAndValidate 未产出）");
+  }
+  setState(
+    CycleState::RECONFIRM,
+    "抓取前再确认：等待新鲜观测复核身份/锚点漂移/摆动平息", ctx.target_id);
+  ReconfirmPolicy policy(ReconfirmConfig{
+      params_.grasp.reconfirm_tolerance_m,
+      static_cast<int>(params_.grasp.reconfirm_max_attempts), false});
+  Eigen::Vector3d reference_anchor = ctx.reference_anchor;
+  while (!cancel_requested_.load()) {
+    // 单次尝试窗口：实测帧间隔 EMA 自适应（运行时优先，禁硬编码墙钟）；
+    // 摆动等平息留在同一窗口预算内，不因摆动帧重开窗口。
+    const double window_s = effectiveReconfirmWaitS();
+    const double deadline_s = now().seconds() + window_s;
+    double after_s = now().seconds();
+    ReconfirmDecision decision;
+    while (!cancel_requested_.load()) {
+      const double remaining_s = deadline_s - now().seconds();
+      bool got_fresh = false;
+      if (remaining_s > 1e-3) {
+        // 再确认不等 received_s 新戳：锁定目标已是 OBSERVED 时用当前锚点
+        // 判漂移（记忆锚点帧仍刷新 updated_s / tracking_status）。
+        got_fresh = waitForFreshCycleTarget(
+          ctx.target_id, after_s, remaining_s, false);
+      }
+      const auto latest = got_fresh ? cycleTargetSnapshot(ctx.target_id) : std::nullopt;
+      if (!latest) {
+        // 窗口耗尽/目标失效：累计一次超限（摆动持续整个窗口也走本路径）。
+        decision = policy.check(ReconfirmSample::exhausted());
+        break;
+      }
+      after_s = latest->updated_s > 0.0 ? latest->updated_s : latest->received_s;
+      ReconfirmSample sample;
+      sample.fresh = true;
+      sample.identity_ok = latest->id == ctx.target_id;
+      sample.swinging = latest->swinging;
+      sample.anchor = latest->center;
+      sample.axis = latest->initial_axis;
+      sample.anchor_drift_m = (latest->center - reference_anchor).norm();
+      decision = policy.check(sample);
+      // PENDING 仅出现在摆动等平息路径：留在本窗口预算内等下一帧复核。
+      if (decision.verdict != ReconfirmVerdict::PENDING) {
+        break;
+      }
+      setState(CycleState::RECONFIRM, decision.reason, ctx.target_id);
+    }
+    if (cancel_requested_.load()) {
+      return false;
+    }
+    if (decision.verdict == ReconfirmVerdict::PASS) {
+      return true;
+    }
+    if (decision.verdict == ReconfirmVerdict::REFINED) {
+      // 精化路径：多视 TSDF 入口比单帧检测稳，超容差只计一次超限并再开窗，
+      // 不把入口平移到跳变锚点（降级重算链已删除，无单帧平移路径）。
+      RCLCPP_WARN(
+        get_logger(),
+        "%s；保留 TSDF 入口，不按单帧平移", decision.reason.c_str());
+      setState(
+        CycleState::RECONFIRM,
+        decision.reason + "；保留精化入口，等观测回到容差", ctx.target_id);
+      continue;
+    }
+    if (decision.verdict == ReconfirmVerdict::PENDING) {
+      // 窗口耗尽计一次超限后重开窗口再试（reason 已含累计次数）。
+      RCLCPP_WARN(get_logger(), "%s", decision.reason.c_str());
+      setState(CycleState::RECONFIRM, decision.reason, ctx.target_id);
+      continue;
+    }
+    // ABORT：放弃本目标，周期终局 SKIPPED_QUALITY；reason 附最近跟踪状态，
+    // 便于区分"观测窗口耗尽"是出视野/深度空洞/跟踪丢失中的哪一类。
+    std::string reason = decision.reason;
+    const auto latest = cycleTargetSnapshot(ctx.target_id);
+    if (latest) {
+      reason += "；最近跟踪状态=" + trackingStatusLabel(latest->tracking_status);
+      reason += " received_s=" + std::to_string(latest->received_s);
+      reason += " updated_s=" + std::to_string(latest->updated_s);
+    }
+    pending_outcome_.store(ExecuteTarget::Result::SKIPPED_QUALITY);
+    return failStage(ctx, FailureCode::OBSERVE_FAILED, reason);
+  }
+  return false;
+}
+
+bool ManipulationSkillsNode::stageReportReady(CycleContext & ctx)
+{
+  ctx.terminal_state = CycleState::READY_FOR_GRASP;
+  ctx.terminal_message =
+    "精化质量通过；grasp.enabled=false，未执行接触动作";
+  return true;
+}
+
+bool ManipulationSkillsNode::stageReportObserveOnly(CycleContext & ctx)
+{
+  // OBSERVE_ONLY 圆满终态：观察+精化验证段已完成，reason 标 observe_only；
+  // PLAN_READY 经 terminalOutcome 映射 SUCCEEDED 上报编排器。
+  ctx.terminal_state = CycleState::PLAN_READY;
+  ctx.terminal_message =
+    "observe_only 周期完成：仅观察与精化验证，未执行靠近/抓取/工具动作";
+  return true;
+}
+
+bool ManipulationSkillsNode::stageMovePregrasp(CycleContext & ctx)
+{
+  // 预抓取移动授权（PREGRASP 级）。
+  if (!requireStageAuthority(ctx, MotionStage::PREGRASP, "到预抓取")) {
+    return false;
+  }
+  setState(CycleState::MTC_APPROACH_INSERT, "直接转移到轨迹净空停位", ctx.target_id);
+  if (!ctx.refined || !grasp_task_) {
+    return failStage(
+      ctx, FailureCode::DEGRADED_CONTACT_FORBIDDEN, "预抓取无入口几何");
+  }
+  const FruitCapsule fruit = fruitCapsuleFor(*ctx.refined);
+  grasp_task_->setContactAcm(ctx.target_id, ContactAcmStage::Pregrasp);
+  if (!ctx.pregrasp_only) {
+    // 拍照位转移也是运动：完整套入/撤退的时间和碰撞验证必须先完成。
+    const auto preflight = grasp_task_->previewFullContact(
+      ctx.entry_tip_pose, ctx.refined->axis, ctx.travel_m, fruit, true, true,
+      params_.photo_pose_named_target);
+    if (!preflight.success) {
+      return failStage(
+        ctx, ExecuteTarget::Result::SKIPPED_UNREACHABLE,
+        FailureCode::SLEEVE_PLAN_FAILED,
+        "首次运动前接近/套入/撤退预验证失败: " + preflight.reason);
+    }
+  }
+  // 观察停在 look-at。从该姿态直接 LIN/PTP 到预抓取现场常无 IK
+  // （08-28 G PTP 0/1；08-31 1405 LIN NO_IK）。拍照位是已知可达的自由空间点。
+  std::string photo_msg;
+  bool from_photo = motion_ && motion_->goToPhotoPose(
+    params_.photo_pose_named_target, execution_enabled_.load(), photo_msg);
+  if (from_photo) {
+    RCLCPP_INFO(get_logger(), "预抓取从拍照位出发: %s", photo_msg.c_str());
+  } else {
+    RCLCPP_WARN(
+      get_logger(),
+      "预抓取未回到拍照位，从当前位规划: %s", photo_msg.c_str());
+  }
+  startContactGuard();
+  const double insert_travel = ctx.pregrasp_only ? 0.0 : ctx.travel_m;
+  RCLCPP_INFO(
+    contactLogger(),
+    "接近筛滚转 target=%s insert_travel=%.3fm pregrasp_only=%s",
+    ctx.target_id.c_str(), insert_travel,
+    ctx.pregrasp_only ? "true" : "false");
+  auto result = grasp_task_->moveToPregrasp(
+    ctx.entry_tip_pose, ctx.refined->axis, fruit, true, insert_travel);
+  stopContactGuard();
+  if (contactAbortSuspected()) {
+    motion_->clearPhotoApproach();
+    return failStage(
+      ctx, ExecuteTarget::Result::FAILED, FailureCode::SLEEVE_PLAN_FAILED,
+      "疑似硬接触（接触检测止损）：接近已取消，须现场确认后 ACK");
+  }
+  if (!result.success && !result.execution_started && motion_ && !from_photo) {
+    if (motion_->goToPhotoPose(
+        params_.photo_pose_named_target, execution_enabled_.load(), photo_msg))
+    {
+      from_photo = true;
+      RCLCPP_WARN(
+        get_logger(),
+        "当前位到预抓取失败（%s），已回拍照位再规划: %s",
+        result.reason.c_str(), photo_msg.c_str());
+      result = grasp_task_->moveToPregrasp(
+        ctx.entry_tip_pose, ctx.refined->axis, fruit, true, insert_travel);
+    }
+  }
+  if (!result.success) {
+    if (result.execution_started) {
+      contact_recovery_required_.store(true);
+      if (motion_) {
+        motion_->clearPhotoApproach();
+      }
+    }
+    return failStage(
+      ctx, ExecuteTarget::Result::SKIPPED_UNREACHABLE,
+      FailureCode::SLEEVE_PLAN_FAILED, "到预抓取失败: " + result.reason);
+  }
+  if (motion_) {
+    if (from_photo) {
+      auto approach = grasp_task_->lastApproachTrajectories();
+      if (!approach.empty()) {
+        motion_->rememberPhotoApproach(std::move(approach));
+      } else {
+        motion_->clearPhotoApproach();
+      }
+    } else {
+      motion_->clearPhotoApproach();
+    }
+  }
+  if (result.execution_started) {
+    contact_recovery_required_.store(true);
+  }
+  ctx.completion_level = std::max(
+    ctx.completion_level, ExecuteTarget::Result::LEVEL_PREGRASP_REACHED);
+  markCheckpoint(
+    ExecuteTarget::Goal::CK_AT_PREGRASP, "到轨迹净空停位（视觉预抓取未改）");
+  return true;
+}
+
+bool ManipulationSkillsNode::stageVerifyPregrasp(CycleContext & ctx)
+{
+  setState(CycleState::RECONFIRM, "轨迹净空停位验证（视觉预抓取未改）", ctx.target_id);
+  if (!ctx.refined || !ctx.refined->valid) {
+    return failStage(
+      ctx, ExecuteTarget::Result::SKIPPED_QUALITY,
+      FailureCode::PREGRASP_RESIDUAL, "预抓取验证无精化几何");
+  }
+  ctx.pregrasp_msg.target_id = ctx.target_id;
+  ctx.pregrasp_msg.tool_profile_id = params_.tool.profile_id;
+  for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+    const auto first_axis = motion_->lookupTransform(params_.frames.base, "tool_axis");
+    const auto first_mouth = motion_->lookupTransform(params_.frames.base, "sleeve_mouth");
+    const auto first_cut = motion_->lookupTransform(params_.frames.base, "cutting_plane");
+    std::this_thread::sleep_for(200ms);
+    const auto second_axis = motion_->lookupTransform(params_.frames.base, "tool_axis");
+    const auto second_mouth = motion_->lookupTransform(params_.frames.base, "sleeve_mouth");
+    const auto second_cut = motion_->lookupTransform(params_.frames.base, "cutting_plane");
+    if (!first_axis || !second_axis || !first_mouth || !second_mouth ||
+      !first_cut || !second_cut)
+    {
+      return failStage(
+        ctx, ExecuteTarget::Result::SKIPPED_QUALITY,
+        FailureCode::EXACT_TF_MISSING,
+        "预抓取缺少 tool_axis/sleeve_mouth/cutting_plane TF");
+    }
+    // 残差计算与三阈值判定在 PregraspResidualChecker 纯核（W5-4）；
+    // 门限来自 yaml grasp.pregrasp_residual.*（原为 1.5°/2.0°/0.003 硬编码，
+    // 部署默认同值），axial 只记录不判定。
+    PregraspPoseSample first_sample;
+    first_sample.tool_axis = *first_axis;
+    first_sample.sleeve_mouth = *first_mouth;
+    first_sample.cutting_plane = *first_cut;
+    PregraspPoseSample second_sample;
+    second_sample.tool_axis = *second_axis;
+    second_sample.sleeve_mouth = *second_mouth;
+    second_sample.cutting_plane = *second_cut;
+    const PregraspThresholds residual_thresholds{
+      params_.grasp.pregrasp_residual.frame_consistent_deg,
+      params_.grasp.pregrasp_residual.axis_deg,
+      params_.grasp.pregrasp_residual.lateral_m};
+    const ResidualReport residual = evaluatePregraspResidual(
+      residual_thresholds, first_sample, second_sample, ctx.refined->bottom,
+      ctx.refined->neck, ctx.refined->axis);
+    ctx.pregrasp_msg.frames_consistent = residual.consistent;
+    ctx.pregrasp_msg.correction_count = attempt;
+    ctx.pregrasp_msg.axis_angle_deg = static_cast<float>(residual.angle_deg);
+    ctx.pregrasp_msg.lateral_error_m = static_cast<float>(residual.lateral_m);
+    ctx.pregrasp_msg.axial_error_m = static_cast<float>(residual.axial_m);
+    const auto geometry = trajectoryApproachGeometry(
+      ctx.entry_tip_pose, ctx.refined->axis, params_.moveit.mtc_approach_along_axis_m,
+      params_.moveit.approach_clearance_m, ctx.pregrasp_only ? 0.0 : ctx.travel_m);
+    const auto current_tip = motion_->lookupTransform(params_.frames.base, params_.frames.tip);
+    const bool at_clearance = geometry && current_tip && current_tip->matrix().allFinite() &&
+      (current_tip->translation() - geometry->transfer.translation()).norm() <=
+      params_.moveit.mtc_cartesian_precision_m;
+    ctx.pregrasp_msg.needs_correction =
+      (!residual.passed || !at_clearance) && residual.consistent;
+    ctx.pregrasp_msg.passed = residual.passed && at_clearance;
+    if (ctx.pregrasp_msg.passed) {
+      ctx.pregrasp_verified = true;
+      ctx.pregrasp_msg.reason = "pregrasp_verified";
+      ctx.completion_level = std::max(
+        ctx.completion_level,
+        completion_level_after_pregrasp_verify(true));
+      return true;
+    }
+    if (ctx.pregrasp_msg.needs_correction && attempt < 2 && grasp_task_) {
+      // 修正回路：第一次到位后按原目标重规划是 no-op；必须从缓存取最新
+      // 精化快照（身份必须仍钉在本周期目标）重算 entry/pregrasp 目标——
+      // 由统一 helper 从最新入口重算轨迹净空点 A，C 仅加一次；
+      // 视觉预抓取与原切断行程语义保持不变，后续接触同步用修正后几何。
+      const auto latest_refined = refinedSnapshot();
+      if (!latest_refined || latest_refined->id != ctx.target_id ||
+        !latest_refined->valid)
+      {
+        RCLCPP_WARN(
+          get_logger(),
+          "预抓取残差超门但无最新精化快照（身份不符/无效），停止修正");
+        break;
+      }
+      Eigen::Isometry3d entry_tip_pose;
+      double travel_m = 0.0;
+      std::string entry_error;
+      if (!contactEntryGeometry(
+          *latest_refined, ctx.target->initial_pose,
+          entry_tip_pose, travel_m, entry_error, !ctx.pregrasp_only))
+      {
+        return failStage(
+          ctx, ExecuteTarget::Result::SKIPPED_QUALITY,
+          entry_error == "剪切参考行程超出执行范围" ?
+          FailureCode::DECISION_REJECTED : FailureCode::EXACT_TF_MISSING,
+          "预抓取修正重算入口时" + entry_error);
+      }
+      ctx.refined = latest_refined;
+      ctx.entry_tip_pose = entry_tip_pose;
+      ctx.travel_m = travel_m;
+      setState(CycleState::RECONFIRM, "预抓取短修正（停—看，不 SetIO）", ctx.target_id);
+      const auto fix = grasp_task_->moveToPregrasp(
+        ctx.entry_tip_pose, ctx.refined->axis, fruitCapsuleFor(*ctx.refined),
+        true, ctx.pregrasp_only ? 0.0 : ctx.travel_m);
+      if (!fix.success) {
+        if (motion_) {
+          motion_->clearPhotoApproach();
+        }
+        break;
+      }
+      if (motion_ && fix.execution_started) {
+        // 修正后终点已变；返程必须先倒放本次实际成功修正，再走原接近。
+        motion_->appendPhotoApproach(grasp_task_->lastApproachTrajectories());
+      }
+      continue;
+    }
+    break;
+  }
+  if (ctx.pregrasp_only) {
+    ctx.pregrasp_msg.reason = "pregrasp_residual_hold";
+    ctx.pregrasp_msg.failure_code = FailureCode::PREGRASP_RESIDUAL;
+    ctx.completion_level = std::max(
+      ctx.completion_level,
+      completion_level_after_pregrasp_verify(false));
+    RCLCPP_WARN(
+      get_logger(),
+      "PREGRASP_ONLY 残差未过门仍停在轨迹净空附近 angle=%.2fdeg lateral=%.4fm",
+      ctx.pregrasp_msg.axis_angle_deg,
+      ctx.pregrasp_msg.lateral_error_m);
+    return true;
+  }
+  pending_outcome_.store(ExecuteTarget::Result::SKIPPED_QUALITY);
+  ctx.failure_code = FailureCode::PREGRASP_RESIDUAL;
+  ctx.pregrasp_msg.failure_code = FailureCode::PREGRASP_RESIDUAL;
+  ctx.pregrasp_msg.reason = "pregrasp_residual";
+  return failStage(ctx, "预抓取残差未过门");
+}
+
+bool ManipulationSkillsNode::stageHoldPregrasp(CycleContext & ctx)
+{
+  // PREGRASP_ONLY 定位门：停在预抓取，不 PTP harvest_stow、不套入、不 SetIO。
+  // 过程线保持靠近（不要写成 RECOVERY_REQUIRED/FAILED）。本阶段只在执行
+  // 分支可达（execution 已使能且预抓取已执行/到位），recovery 旗标直接置位：
+  // 调度 ACK 前不得 Survey / 下一颗。
+  setState(
+    CycleState::MTC_APPROACH_INSERT,
+    "PREGRASP_ONLY：停在轨迹净空点，视觉预抓取未改，未套入未 SetIO",
+    ctx.target_id);
+  contact_recovery_required_.store(true);
+  RCLCPP_INFO(
+    get_logger(),
+    "PREGRASP_ONLY 停在轨迹净空点（视觉预抓取未改）；ACK 后再 Survey / 派下一颗");
+  return true;
+}
+
+bool ManipulationSkillsNode::stagePlanSleeveAndReverseRetreat(CycleContext & ctx)
+{
+  // 套入前授权（CONTACT 级）：GraspDecision 复检不通过 → skipped_quality。
+  if (!requireStageAuthority(ctx, MotionStage::CONTACT, "套入预规划")) {
+    return false;
+  }
+  setState(CycleState::PREVIEW_CONTACT_PLANNING, "预规划套入与反向撤退", ctx.target_id);
+  if (!ctx.refined) {
+    return failStage(
+      ctx, FailureCode::DEGRADED_CONTACT_FORBIDDEN, "套入预规划无几何");
+  }
+  if (!grasp_task_) {
+    return failStage(
+      ctx, FailureCode::DEGRADED_CONTACT_FORBIDDEN, "套入预规划无几何");
+  }
+  grasp_task_->setContactAcm(ctx.target_id, ContactAcmStage::Pregrasp);
+  const auto result = grasp_task_->previewFullContact(
+    ctx.entry_tip_pose, ctx.refined->axis, ctx.travel_m,
+    fruitCapsuleFor(*ctx.refined), true);
+  if (!result.success) {
+    return failStage(
+      ctx, ExecuteTarget::Result::SKIPPED_UNREACHABLE,
+      FailureCode::SLEEVE_PLAN_FAILED, "套入/撤退预规划失败: " + result.reason);
+  }
+  ctx.sleeve_planned = true;
+  markCheckpoint(ExecuteTarget::Goal::CK_SLEEVE_PLANNED, "套入与反向撤退预规划过门");
+  return true;
+}
+
+bool ManipulationSkillsNode::stageSleeveLinear(CycleContext & ctx)
+{
+  // 套入执行前授权（CONTACT 级）：GraspDecision 复检不通过 → skipped_quality。
+  if (!requireStageAuthority(ctx, MotionStage::CONTACT, "沿轴套入")) {
+    return false;
+  }
+  setState(CycleState::MTC_APPROACH_INSERT, "沿轴 LIN 套入", ctx.target_id);
+  if (grasp_task_) {
+    grasp_task_->setContactAcm(ctx.target_id, ContactAcmStage::Sleeve);
+  }
+  if (!ctx.sleeve_planned || !grasp_task_ || !ctx.refined) {
+    return failStage(
+      ctx, FailureCode::SLEEVE_PLAN_FAILED, "套入前未完成正反向预规划");
+  }
+  startContactGuard();
+  const auto result = grasp_task_->sleeveLinear(
+    ctx.entry_tip_pose, ctx.refined->axis, ctx.travel_m, true,
+    [this, &ctx](std::string & why) {
+      StageDenial denial;
+      return authorizeStage(ctx, MotionStage::CONTACT, why, denial);
+    });
+  stopContactGuard();
+  if (result.execution_started) {
+    contact_recovery_required_.store(true);
+  }
+  if (contactAbortSuspected()) {
+    pending_outcome_.store(ExecuteTarget::Result::FAILED);
+    ctx.failure_code = FailureCode::SLEEVE_PLAN_FAILED;
+    ctx.sleeve_partial = true;
+    return failStage(ctx, "疑似硬接触（接触检测止损）：套入已取消，须现场确认后 ACK");
+  }
+  if (!result.success) {
+    pending_outcome_.store(
+      result.execution_started ?
+      ExecuteTarget::Result::FAILED : ExecuteTarget::Result::SKIPPED_UNREACHABLE);
+    ctx.failure_code = FailureCode::SLEEVE_PLAN_FAILED;
+    ctx.sleeve_partial = result.execution_started;
+    return failStage(ctx, "沿轴套入失败: " + result.reason);
+  }
+  ctx.sleeve_partial = false;
+  ctx.completion_level = std::max(
+    ctx.completion_level,
+    ExecuteTarget::Result::LEVEL_SLEEVE_COMPLETED);
+  markCheckpoint(ExecuteTarget::Goal::CK_SLEEVED, "沿轴套入到位");
+  return true;
+}
+
+bool ManipulationSkillsNode::stageActuateCutter(CycleContext & ctx)
+{
+  if (ctx.pregrasp_only) {
+    return failStage(
+      ctx, FailureCode::CUT_COMMAND_FAILED, "PREGRASP_ONLY 不得 SetIO");
+  }
+  if (!tool_enabled_.load()) {
+    setState(CycleState::ACTUATE_TOOL, "tool.enabled=false，跳过末端 IO", ctx.target_id);
+    ctx.cut_command_accepted = false;
+    ctx.cut_confirmed = false;
+    return true;
+  }
+  // 剪切授权（TOOL 级）：GraspDecision 复检不通过 → skipped_quality；
+  // SetIO 下发前的再兜底在 commandToolClose（同一授权矩阵，凭本快照）。
+  if (!requireStageAuthority(ctx, MotionStage::TOOL, "末端工具剪切")) {
+    return false;
+  }
+  // 授权快照：commandToolClose 的 TOOL 复检必须带真实上下文
+  //（令牌/pregrasp_verified），否则裸 probe 恒拒死剪切链。
+  tool_authority_ctx_ = ctx;
+  setState(CycleState::ACTUATE_TOOL, "触发末端工具剪切", ctx.target_id);
+  std::string reason;
+  ToolCommandContext command;
+  command.run_id = ctx.target_id;
+  command.target_id = ctx.target_id;
+  command.contact_transaction_id = ctx.contact_transaction_id;
+  if (!tool_actuator_.arm(command, reason) || !commandToolClose(reason)) {
+    tool_actuator_.markUnknown();
+    ctx.failure_code = FailureCode::TOOL_STATE_UNKNOWN;
+    return failStage(
+      ctx, "tool_state_unknown: " + reason + "（不自动撤退、不重发）");
+  }
+  ctx.cut_command_accepted = true;
+  markCheckpoint(ExecuteTarget::Goal::CK_CUT_ACCEPTED, "SetIO 受理（≠切断）");
+  ctx.completion_level = std::max(
+    ctx.completion_level,
+    ExecuteTarget::Result::LEVEL_CUT_COMMAND_ACCEPTED);
+  // 批次3：cut_confirmed 由 stageVerifyCut 等工具 DI 新沿置位（SetIO ACK
+  // 仍 ≠ 切断确认；DI 沿=BLADE_CLOSED 层位证据，M0 后升级组合判别）。
+  ctx.cut_confirmed = false;
+  return true;
+}
+
+bool ManipulationSkillsNode::stageVerifyCut(CycleContext & ctx)
+{
+  if (!tool_enabled_.load()) {
+    ctx.cut_confirmed = false;
+    return true;
+  }
+  if (!ctx.cut_command_accepted) {
+    return failStage(
+      ctx, ExecuteTarget::Result::FAILED,
+      FailureCode::CUT_COMMAND_FAILED, "无 CUT_COMMAND_ACCEPTED");
+  }
+  // 批次3：有界等待工具 DI 新沿（onIoState→confirmFeedback 置
+  // CUT_FEEDBACK_CONFIRMED）。时间只作截止不作到位证明；超时=
+  // CUT_UNCONFIRMED 保守收口——不撤退、不重发、不 resume（FINAL_PLAN
+  // L89：未确认切断时果可能仍连枝，禁止正常撤离路径）。
+  const double timeout_s = params_.tool.feedback_timeout_s;
+  const auto deadline = std::chrono::steady_clock::now() +
+    std::chrono::duration<double>(timeout_s);
+  while (tool_actuator_.state() !=
+    ToolActuatorState::CUT_FEEDBACK_CONFIRMED)
+  {
+    if (cancel_requested_.load()) {
+      return failStage(
+        ctx, ExecuteTarget::Result::CANCELED,
+        FailureCode::CUT_COMMAND_FAILED, "等切断反馈中被取消");
+    }
+    if (std::chrono::steady_clock::now() >= deadline && tool_actuator_.expireUnconfirmed()) {
+      ctx.failure_code = FailureCode::CUT_FEEDBACK_TIMEOUT;
+      return failStage(
+        ctx, ExecuteTarget::Result::FAILED,
+        FailureCode::CUT_FEEDBACK_TIMEOUT,
+        "CUT_UNCONFIRMED：反馈窗口内无工具 DI 新沿（保持现状待人工，"
+        "不自动撤退不重发）");
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  ctx.cut_confirmed = true;
+  ctx.completion_level = std::max(
+    ctx.completion_level, ExecuteTarget::Result::LEVEL_CUT_CONFIRMED);
+  markCheckpoint(ExecuteTarget::Goal::CK_CUT_CONFIRMED, "工具 DI 新沿确认");
+  return true;
+}
+
+bool ManipulationSkillsNode::stageReleasePayload(CycleContext & ctx)
+{
+  // 批次3（G3）：收集位释放。未实际用刀（tool 关/PREGRASP）时直通。
+  if (!tool_enabled_.load() || !ctx.cut_command_accepted) {
+    return true;
+  }
+  // 同一周期目标的释放继承 ACTUATE_TOOL 的授权快照（worker 同线程覆盖）。
+  tool_authority_ctx_ = ctx;
+  if (!commandToolOpen()) {
+    return failStage(
+      ctx, ExecuteTarget::Result::FAILED,
+      FailureCode::TOOL_STATE_UNKNOWN, "收集位释放（开刀）失败");
+  }
+  publishToolState("cmd:open@stow");
+  return true;
+}
+
+bool ManipulationSkillsNode::stageExecuteReservedReverseRetreat(CycleContext & ctx)
+{
+  setState(CycleState::MTC_RETREAT, "MTC 沿插入反方向保持直线撤离", ctx.target_id);
+  if (grasp_task_) {
+    grasp_task_->setContactAcm(ctx.target_id, ContactAcmStage::Retreat);
+  }
+  // 撤离一律从实际位姿规划（部分套入不逆播完整名义轨迹；ReverseNominal
+  // 死分支与恒 WARN 已随 retreat_policy.hpp 删除，W5-12）。
+  // 撤离授权经 GraspTask retreat 门（Active∧robotReady∧!cancel∧execution∧
+  // grasp，无决策复检——插入后目标常被遮挡/收割后决策翻转，撤离不依赖视觉）。
+  const auto result = grasp_task_->retreat(
+    ctx.entry_tip_pose, ctx.refined->axis, ctx.travel_m, true);
+  if (!result.success) {
+    ctx.failure_code = FailureCode::RETREAT_FAILED;
+    return failStage(ctx, "MTC 抓取后撤离失败，需要人工处理: " + result.reason);
+  }
+  contact_recovery_required_.store(false);
+  ctx.retreat_confirmed = true;
+  ctx.completion_level = std::max(
+    ctx.completion_level,
+    ExecuteTarget::Result::LEVEL_RETREAT_CONFIRMED);
+  markCheckpoint(ExecuteTarget::Goal::CK_RETREATED, "沿轴撤回轨迹净空点");
+  return true;
+}
+
+bool ManipulationSkillsNode::stageReturnHarvestStow(CycleContext & ctx)
+{
+  // 回收纳位是接触后的自由空间转移（TRANSIT 级：不再做决策复检）。
+  if (!requireStageAuthority(ctx, MotionStage::TRANSIT, "回拍照位")) {
+    return false;
+  }
+  setState(CycleState::MTC_RETREAT, "回拍照位", ctx.target_id);
+  if (!motion_) {
+    return failStage(ctx, "MoveIt 尚未初始化");
+  }
+  std::string message;
+  const auto hops = peach_arm::harvestStowNamedHops(
+    params_.photo_pose_named_target, params_.harvest_stow_named_target);
+  for (const auto & named : hops) {
+    if (!motion_->goToPhotoPose(named, execution_enabled_.load(), message)) {
+      return failStage(
+        ctx, FailureCode::RETREAT_FAILED,
+        "返回 " + named + " 失败: " + message);
+    }
+  }
+  contact_recovery_required_.store(false);
+  markCheckpoint(ExecuteTarget::Goal::CK_STOWED, "回拍照位");
+  return true;
+}
+
+bool ManipulationSkillsNode::stageVerifyHarvestOutcome(CycleContext & ctx)
+{
+  const bool harvest_ok = harvestConfirmed(ctx.cut_confirmed, ctx.retreat_confirmed);
+  if (tool_enabled_.load() && grasp_enabled_.load() && !harvest_ok) {
+    pending_outcome_.store(ExecuteTarget::Result::FAILED);
+    ctx.failure_code = ctx.retreat_confirmed ?
+      FailureCode::CUT_FEEDBACK_TIMEOUT : FailureCode::RETREAT_FAILED;
+    return failStage(ctx, "切断或撤退未确认，不得记采摘成功");
+  }
+  if (harvest_ok) {
+    ctx.completion_level = ExecuteTarget::Result::LEVEL_HARVEST_CONFIRMED;
+  }
+  return true;
+}
+
+bool ManipulationSkillsNode::stageCompleteTarget(CycleContext & ctx)
+{
+  // 账本由 peach_supervisor 按 ExecuteTarget 终态写入；此处只落周期终局。
+  ctx.terminal_state = CycleState::SUCCEEDED;
+  if (ctx.pregrasp_only) {
+    ctx.terminal_message =
+      "PREGRASP_ONLY：停在预抓取，未套入未 SetIO；ACK 后再 Survey";
+  } else if (ctx.cut_confirmed && ctx.retreat_confirmed) {
+    ctx.terminal_message = "切断与撤退均已确认";
+  } else {
+    ctx.terminal_message =
+      "周期完成；tool.enabled=false 或未宣称采摘成功";
+  }
+  return true;
+}
+
+void ManipulationSkillsNode::publishViewMarkers(
+  const Eigen::Vector3d & target,
+  const std::vector<ViewCandidate> & candidates)
+{
+  // 只画已走到的视点（调用方传 0 或 1 个）。Nav2 只发正在跟随的 path；
+  // MoveIt Visual Tools 在 execute 后再 publishTrajectoryLine。生成阶段的
+  // 全部候选会在未到达处画箭头。
+  visualization_msgs::msg::MarkerArray array;
+  visualization_msgs::msg::Marker clear;
+  clear.action = visualization_msgs::msg::Marker::DELETEALL;
+  array.markers.push_back(clear);
+  const std::size_t limit = std::min<std::size_t>(candidates.size(), 24U);
+  for (std::size_t index = 0; index < limit; ++index) {
+    visualization_msgs::msg::Marker marker;
+    marker.header.frame_id = params_.frames.base;
+    marker.header.stamp = now();
+    marker.ns = "candidate_views";
+    marker.id = static_cast<int>(index);
+    marker.type = visualization_msgs::msg::Marker::ARROW;
+    marker.action = visualization_msgs::msg::Marker::ADD;
+    geometry_msgs::msg::Point start;
+    start.x = candidates[index].camera_pose.translation().x();
+    start.y = candidates[index].camera_pose.translation().y();
+    start.z = candidates[index].camera_pose.translation().z();
+    geometry_msgs::msg::Point end;
+    end.x = target.x();
+    end.y = target.y();
+    end.z = target.z();
+    marker.points = {start, end};
+    marker.scale.x = 0.003;
+    marker.scale.y = 0.007;
+    marker.scale.z = 0.010;
+    marker.color.r = static_cast<float>(1.0 - candidates[index].score);
+    marker.color.g = static_cast<float>(candidates[index].score);
+    marker.color.b = 0.25F;
+    marker.color.a = 0.75F;
+    array.markers.push_back(marker);
+  }
+  marker_pub_->publish(array);
+}
+
+}  // namespace peach_arm

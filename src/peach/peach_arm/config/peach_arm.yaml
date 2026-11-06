@@ -1,0 +1,128 @@
+# peach_arm 参数全量清单（nav2 式：launch 以 ParameterFile 装入，部署值即事实源）
+# 代码侧默认与校验规则：src/arm_parameters.yaml，经 generate_parameter_library 生成。
+# 键名冻结（真机命令/文档零破坏）。修改参数须核对 GPL 声明与本部署文件。
+# 运行期临时改参：ros2 param set（技能节点空闲态生效；感知/重建/监控/lifecycle 需重启或 reconfigure）。
+# 跨包轴向后撤（tool.entry_d_* / refit.*_standoff_m / moveit.mtc_approach_along_axis_m）
+# 由 grasp_standoffs.yaml 经 launch 注入覆盖，此处值仅为默认。
+peach_arm:
+  ros__parameters:
+    frames:
+      base: base_link  # 世界/基座坐标系。
+      tip: tcp  # 规划/IK 末端连杆：MoveIt 组 manipulator_e5 的 tip_link（URDF 内建 tcp，见 aubo_description tcp.xacro）。
+      camera: camera_depth_optical_frame  # 相机坐标系；视点姿态按 ROS 光学坐标系（+Z 前、+X 右、+Y 下）生成。
+      tool: tcp  # 工具坐标系（当前与 tip 同为 tcp）。
+    moveit:
+      planning_group: manipulator_e5  # MoveIt 规划组。
+      planning_time_s: 1.5  # MTC/默认单次规划时间上限（秒）。观察另用 observe_planning_time_s。
+      planning_attempts: 1  # 默认规划尝试次数。观察另用 observe_planning_attempts。
+      velocity_scaling: 0.1  # 接触段速度缩放（MTC 靠近/插入/撤离）。0.05 时接近段常被参数化到 40s 而护栏拒发；真机初始验证不得高于 0.1。
+      acceleration_scaling: 0.1  # 兼容旧 YAML 保留，现行 MTC 不消费；实际 a=min(1,2v)，v 为对应转移/近果档。
+      transit_velocity_scaling: 0.1  # 自由空间转移速度缩放（环绕视点/拍照位姿往返）；高速度缩短高重力矩姿态持续时间，反而降低过流风险；真机初始验证不得高于 0.1。
+      transit_acceleration_scaling: 0.1  # 自由空间转移加速度缩放（同 transit_velocity_scaling 的档位约束）。
+      execute_timeout_s: 5.0  # 单条轨迹/MTC 解执行有界等待（秒）；超时下发 stop 并判失败。正常段约 1–4 s，不再用 90 s 空等死掉的 move_group。
+      obstacle_guard_enabled: false  # 场景枝叶方块不参与避障。真实树冠太密，把叶墙当碰撞体会把套入直线判死；true 才让相机连杆受查。空闲 param set 生效
+      obstacle_guard_links: [camera_body_link]  # guard 开时唯一受查连杆（避障目标=保护相机）
+      obstacle_object_ids: [peach_scene_obstacles]  # 场景障碍对象 id（peach_scene_obstacles 快照节点写入）；豁免=tool.links×这些对象+<octomap>
+      pilz_pipeline: pilz_industrial_motion_planner  # Pilz 规划管线名（PTP/LIN）。
+      fallback_pipeline: ompl  # Pilz 失败后的兜底规划管线。
+      mtc_free_space_pipeline: pilz_industrial_motion_planner  # MTC 转移管线：直接 PTP 到轨迹净空点 A；已齐且几何允许时用单条 LIN。
+      mtc_free_space_planner: LIN  # 直连转移的 Pilz LIN；套入/撤退为单条 CartesianPath，不另停视觉预抓取。
+      mtc_cartesian_step_m: 0.005  # MTC 笛卡尔段步长（米）。
+      mtc_cartesian_min_fraction: 0.95  # MTC 直线插入最低完成比例。1.0 会因笛卡尔末步离散在接触深度失败（真机常见 0.966）；0.95 仍拒绝半程插入。
+      mtc_cartesian_precision_m: 0.001  # MTC 笛卡尔段平移精度（米）。
+      mtc_max_solutions: 5  # PREVIEW 才凑这么多 MTC 解。执行路径 plan(1)：只下发第一条，避免 PTP 为凑满 5 解耗尽 planning_time_s。
+      mtc_approach_max_duration_s: 0.0  # MTC 接近段预计时长上限（秒）。0=不按时长拒发。绕腕看关节行程；口侧/上方绕行看袋囊 keepout。
+      mtc_approach_max_total_joint_travel_rad: 12.0  # MTC 接近段六轴累计绝对行程硬上限（弧度）。拦绕腕；口侧/上方绕行另审袋囊 keepout。
+      mtc_approach_max_single_joint_travel_rad: 6.1  # MTC 接近段任一单轴累计绝对行程硬上限（弧度）。6.1=URDF ±3.05 满行程；E5 无法 2π 折返。
+      mtc_approach_max_detour_ratio: 1.5  # 接近 TCP 路径长/弦长上限。0=不查。2026-10-16 真实相机+mock：好簇 path/chord 1.06–1.08（max_dev≈5 cm、recede 0），差簇 2.40–2.42（max_dev≈25 cm、recede≈10 cm）；1.5 放行近直线 PTP、拒绝大弧。旧 2.6 会放行 2.40 族。
+      mtc_approach_max_chord_deviation_m: 0.12  # 接近 TCP 相对起止弦最大偏离（米）。0=不查。好簇 ≈0.05 m，差簇 ≈0.25 m。
+      mtc_approach_max_recede_m: 0.08  # 接近中途相对起点更远离目标的最大回退（米）。0=不查。好簇 0，差簇 ≈0.096 m。
+      mtc_approach_transit_max_detour_ratio: 1.5  # 接近主路径 PTP 段（关节弧）的 TCP 路径长/弦长上限。0=不查。须 >0 才会审 PTP 弧。与接近段同值：拒 2.4 族大弧后试下一 IK 候选。
+      mtc_approach_transit_max_chord_deviation_m: 0.12  # 接近主路径 PTP 段 TCP 相对起止弦最大偏离（米）。0=不查。
+      mtc_approach_transit_max_recede_m: 0.08  # staging 转移级中途相对起点更远离目标的最大回退（米）。0=不查。
+      mtc_approach_max_tcp_rotation_deg: 110.0  # 接近段相对起点 TCP 姿态测地线绝对上限（度）。0=不查。感知允许水平袋：keep-roll γ≈90°，额外滚转上限 45°；该门检查倾斜与滚转的合成旋转；仍拦 180° 拧腕。
+      mtc_approach_tcp_rotation_slack_deg: 20.0  # 相对本段起止测地线的路径余量（度）。0=只看绝对上限。拦对轴只需 ~20° 却中途拧到 90°+ 的 PTP（09-11 的 108°）。
+      mtc_approach_keepout_radius_m: 0.12  # ①层果实胶囊回退半径（米）：感知直径无效时用本值作 fruitRadiusM 的 base，再加 fruit_inflation_m。键名冻结，不再当半无限圆柱半径。
+      mtc_approach_keepout_axial_m: 0.12  # ①+②层开关：>0 启用接近段果实胶囊/反爬审查。0=关闭。套入/撤退不审。
+      mtc_approach_cartesian_max_distance_m: 0.8  # 直连转移 LIN 弦长/弧长上限；超过改试受原护栏约束的直接 PTP。
+      mtc_approach_along_axis_m: 0.0  # 原视觉预抓取沿轴后撤 S，由共享 grasp_standoffs 注入；净空参数另加且不改视觉。
+      approach_clearance_m: 0.05  # 仅轨迹：视觉预抓取沿反套入方向后移；0=视觉停位。视觉/重建几何不变。
+      approach_near_velocity_scaling: 0.10  # 近果速度，仅单条套入/撤退；转移使用 velocity_scaling。
+      mtc_approach_max_align_deg: 20.0  # 已对轴直连 LIN 的姿态路径约束容差；未齐时直接 PTP。
+      observe_planning_time_s: 1.0  # 观察短 LIN 单次规划时间上限（秒）。
+      observe_planning_attempts: 1  # 观察短 LIN 规划尝试次数。
+      observe_max_duration_s: 0.0  # 观察转移轨迹预计时长上限（秒）。0=不按时长拒发。绕行看累计/单轴行程。
+      observe_max_total_joint_travel_rad: 4.0  # 观察转移六轴累计行程上限（弧度）。09-01 现场 0.15m 观察 LIN 实测 2.63–3.70，2.5 会拒合法短移。
+      observe_max_single_joint_travel_rad: 1.5  # 观察转移单轴累计行程上限（弧度）。
+      photo_planning_time_s: 3.0  # 回拍照位 OMPL 回退规划时间上限（秒）。原路返程不规划。
+      photo_ptp_planning_time_s: 0.5  # 回拍照位先试 Pilz PTP；确定性插值，失败即回退 OMPL，不必用满 photo_planning_time_s。
+      transit_max_duration_s: 0.0  # goToPhotoPose 新规划 PTP/OMPL 预计时长上限（秒）。0=不按时长拒发。原路返程（上一趟拍照位→预抓取倒放）不过此时长/行程门。PTP 失败回退 OMPL 后仍须过行程门。
+      transit_max_total_joint_travel_rad: 6.0  # goToPhotoPose 新规划 PTP/OMPL 六轴累计绝对行程上限（弧度）。原路返程不过此门。段间接缝计入行程（原始 |Δq|，不按最短角）。
+      transit_max_single_joint_travel_rad: 2.5  # goToPhotoPose 新规划 PTP/OMPL 任一单轴累计绝对行程上限（弧度）。原路返程不过此门。
+    photo_pose_named_target: global_photo_pose  # 全局拍照位姿的 SRDF 命名状态（go_to_photo_pose 服务的目标），与 aubo_e5_moveit_config/config/aubo_e5.srdf 的 group_state 对应。
+    photo_pose_joint_tolerance_rad: 0.05  # goToPhotoPose 成功出口：每轴当前关节与命名状态 |Δq| 上限（弧度）。execute=false 仍核当前关节。
+    photo_pose_max_joint_vel_rad_s: 0.05  # goToPhotoPose 成功出口：任一轴 |qdot| 上限（弧度/秒）；未静止则 photo_pose_mismatch。
+    harvest_stow_named_target: global_photo_pose  # 接触后回到的命名状态。SRDF 里 harvest_stow 是 2026-08-13 的旧拍照位（wrist2 -0.50），现行拍照位是 global_photo_pose（2026-09-17，wrist2 -0.28）。二者同名时回收纳只走拍照位一跳，不再续一段旧位。空串同样回退 photo_pose_named_target。
+    scan:
+      observation_radius_m: 0.45  # 观察半径参考（米）：视点从当前相机沿直线截步；画面过小时才向本值/下限靠近，不再把相机贴到球面上。09-17 由 0.40 上调：PS800-E1 深度额定 0.4-0.8 m，环绕下限须留余量。
+      minimum_radius_m: 0.42  # 观察半径下限（米）：退出深度相机近距盲区。09-17 由 0.32 上调：原值低于 PS800-E1 额定下限 0.4 m（percipio 端深度无效靠占比门兜底；peach_stereo 端 SGBM 理论下限 ~0.27 m，近档待近距标定后再评估放开）。
+      azimuth_step_deg: 12.0  # 候选视点的方位角步进（度）。每侧只走一步（实现侧钉死，禁止大环绕；原 azimuth_limit_deg 死键已删）。
+      elevation_step_deg: 8.0  # 候选视点的俯仰角步进（度）。
+      elevation_limit_deg: 0.0  # 候选视点的俯仰角上限（度）。0=不俯仰环绕，只做水平短 PTP。
+      preferred_baseline_deg: 12.0  # 视点评分期望基线角（度），不是质量门。质量门 minimum_baseline_deg 部署为 0（单视可通过）。
+      radial_step_m: 0.015  # 半径向最小半径收敛的每步进给（米）。（原 candidate_layers / views_to_minimum_radius 死键已删：分层实际由画面过小的 want_closer 决定。）
+      max_camera_step_m: 0.15  # 观察每步相机直线位移上限（米）。沿当前位到候选视点截断。部署覆盖门角基线为 0°（单视可通过）；本值仍限制补视步长，禁止绕球面走远路。
+      workspace_max_reach_m: 0.78  # 相机位置距 base 原点上限（米）。超出则沿视线收进球内并提高评分，不因超限清空候选。E5 标称约 0.80 m。
+      maximum_moves: 2  # 单目标观察移动次数封顶。当前位先采帧；覆盖未过则把次数走完（只 LIN，失败换候选），不是环绕。覆盖达标立即停。
+      min_effective_views: 1  # 质量尚未达标时的主动移动有效视点下限（日志/失败文案）。停准则以质量门和 maximum_moves 为准。当前位采帧另计。
+      assumed_frame_interval_s: 0.4  # 未测得观测间隔 EMA 时，仅用于等帧/再确认/精化等待的回退帧间隔（秒）。归档现场中位约 0.4 s（≈2.5 FPS）；0=等待回退到各自超时上限。不预填 EMA，不收紧新鲜度门。不改 Percipio launch 请求帧率。
+      min_camera_height_m: 0.06  # 相机位置 z 下限（base 系，桌面保护平面）：低于此的视点物理穿桌、规划必败，生成阶段直接剔除。语义上是 protected_zones 的“z<下限半空间”特例 shortcut，两者并存、各自生效。
+      protected_zones: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # 环境几何保护区（阶段 F1）：base_link 系轴对齐盒列表，stride-6 扁平编码 [xmin,ymin,zmin,xmax,ymax,zmax]*N（米）。视点生成剔除相机位置落入任一盒（闭区间，含盒表面）的候选；GraspTask 把同一列表写入 planning scene 碰撞盒，接触段规划碰撞检查兜底。装载时逐盒校验：长度非 6 倍数的残余组、含非有限分量或任一轴 min>=max 的盒告警并丢弃（不炸节点）。与 min_camera_height_m 的关系：桌面保护平面是保护区的「z<下限半空间」特例 shortcut，两者并存、各自生效。空保护区写占位盒 [0,0,0,0,0,0]（min==max 装载时丢弃；空 double_array 会让参数库拒启）。
+      frame_wait_s: 4.0  # 视点后等待新帧的超时上限（秒）。实测 EMA 时 ≈4 帧+1s（下限 2s）；未测得时用 assumed_frame_interval_s 估窗口，不预填 EMA。本值为回退值与自适应上限。
+    quality:
+      minimum_views: 1  # 质量门最少机位数，与重建 capture.min_views 对齐。单视即可，不强制再移一个视点。
+      allow_unrefined_geometry: false  # true 时用场景观测当精化入口（跳过重建 READY/refined 门）。默认关。harvest_system skip_reconstruction:=true 时覆盖为 true；mock/real 使用同一显式作业选择。
+      minimum_baseline_deg: 0.0  # 质量门最大基线角下限（度）。0=单视可通过，不为张角再补一次短移。
+      minimum_mean_nearest_baseline_deg: 0.0  # 质量门平均最近基线角下限（度）。0=不要求多视张角。
+      minimum_mean_depth_ratio: 0.4  # 质量门平均有效深度比例下限（0~1）。
+      maximum_data_age_s: 3.0  # 质量证据数据最大年龄（秒）。2.0 时 ~1 Hz 诊断心跳会 reconstruction_data_stale，观察收口抓不到证据。
+      maximum_axis_angle_deg: 35.0  # 检测轴与重建轴完全错轴诊断上限（度）；只打诊断旗标。套入许可走重建动态径向/轴向预算，本角不单独授权或拒绝接触。
+    execution:
+      enabled: false  # 执行使能（默认只规划）：动作入口在使能时自动一次性武装；手动运动 Trigger 另需 set_execution_armed。依赖链 execution→grasp→tool 由参数校验钩子强制。
+      require_robot_status: true  # 安全门是否要求 robot_status 在线。真机 KEEP true。harvest_system mock 经 peach_arm.launch require_robot_status:=false 覆盖（bringup mock 不起 aubo_io_controller，否则 Survey 入口 robot_status_missing）。
+      robot_status_max_age_s: 1.0  # robot_status 最大年龄（秒）。
+      target_observation_max_age_s: 3.0  # 目标观测新鲜度门下限（秒）。未测得帧间隔时用本值；测得后只按低帧率放宽，不得收得比本值更紧。
+    grasp:
+      enabled: false  # 抓取使能（默认停在 READY_FOR_GRASP，不执行接触动作）；开启要求 execution.enabled=true。
+      neck_margin_m: 0.015  # 入袋后越过袋口的颈部余量（米）。
+      minimum_travel_m: 0.02  # 最小插入行程（米）。
+      maximum_travel_m: 0.2  # 最大插入行程（米）。
+      reconfirm_wait_s: 6.0  # 抓取前再确认（2.7-RECONFIRM）单次尝试的新鲜观测等待窗口上限（秒）：实测帧间隔 EMA 自适应伸缩，本值为未测得帧率时的回退值与自适应上限；摆动等平息也在本窗口预算内。
+      reconfirm_tolerance_m: 0.03  # 抓取前再确认的锚点漂移容差（米）：最新观测锚点与 finalize 时感知底/颈中点的偏差上限。超限保留 TSDF 入口并再开窗（禁止单帧平移）。
+      reconfirm_max_attempts: 3  # 抓取前再确认的累计超限放弃阈值（次）：漂移超限/窗口耗尽/摆动不息任一计一次超限，累计达到本值 → SKIPPED_QUALITY（reason 含“目标持续摆动”）。
+      allow_stale_anchor: false  # 回退开关（验证期遗留，室外默认关闭）：true 时恢复旧行为——再确认等不到新鲜观测、MTC 前观测陈旧时按静态目标锚点继续执行；false 时新鲜度由 ReconfirmTarget 单点把关，MTC 前不再二次放行 stale。
+      fruit_inflation_m: 0.01  # ①层果实胶囊固定膨胀（米）：果实胶囊半径 = 感知拟合直径/2 + 本值（感知直径含袋；无效时回退 mtc_approach_keepout_radius_m 并告警）。
+      pregrasp_residual:  # 预抓取残差三阈值（VerifyPregrasp 门限；W5 前为硬编码同值）。
+        frame_consistent_deg: 1.5  # 两次采样（间隔 200ms）tool Z 帧间一致上限（度，严格小于才 consistent）。
+        axis_deg: 2.0  # tool Z 与袋轴夹角上限（度，<=）。
+        lateral_m: 0.003  # sleeve_mouth/cutting_plane 相对袋几何的横向偏差上限（米，<=；axial 只记录不判定）。
+      contact_detect:  # ④层硬接触止损（关节电流特征判别，SDK 原始单位）：默认关；阈值须真机受控试验标定后启用，<=0 不判该项。
+        enabled: false
+        baseline_s: 0.2  # 守护段开始前的静止基线窗（秒）。
+        slope_threshold: 0.0  # 腕轴电流偏差增长速率阈值（单位/秒）。
+        spike_threshold: 0.0  # 腕轴电流偏差瞬时阈值（单位）。
+    tool:
+      enabled: false  # 工具使能（默认关闭工具 IO）；开启要求 grasp.enabled=true。
+      io_fun: 3  # 工具 IO 功能号（SetIO 的 fun）。
+      io_pin: 0  # 工具 IO 引脚号（SetIO 的 pin）。
+      close_state: 1.0  # 工具闭合写入的 IO 电平值。
+      d_inner_m: 0.120  # 工具开口径（米）：unrefined 链袋径门；整栈按 tool_profile 注入（三把剪切手 0.030/0.080/0.120）。
+      feedback_timeout_s: 2.0  # 切断反馈 DI 新沿有界等待（秒）；超时 CUT_UNCONFIRMED（不撤退不重发）。
+      links: [base_link, shoulder_Link, upperArm_Link, foreArm_Link, wrist1_Link, wrist2_Link, wrist3_Link, tool_axis, cutting_plane, tcp, sleeve_mouth, tool_body_link, quick_changer_link]  # 场景障碍豁免连杆（③层；2026-09-29 避障只为保护相机后=全机器人−camera_body_link，臂/末端轻微碰撞可接受）。防呆：不得加入 camera_body_link（避障目标静默失效）。改工具须同步 URDF/tcp.xacro 连杆名。
+      contact_links: [sleeve_mouth, tcp, tool_axis, cutting_plane]  # 接触阶段（套入/剪切）× 目标对象豁免的工具连杆（不含筒体/快换件——防撞主力保持受查）。
+      body_length_m: 0.14  # 工具包络长（米，①层果实胶囊审查用）；与档案 geometry_m.body_length 对齐，整栈按档案注入。
+      body_radius_m: 0.11  # 工具包络半径（米）；半径只径向、不含端球（端球会吃掉预抓取轴向余量）；整栈按档案注入。
+      profile_id: adaptive_shear_v1  # 当前末端工具档案标签（PregraspVerification.tool_profile_id）。基础值=自适应剪切手；整栈由 launch tool_profile 档案注入覆盖。
+    timeouts:
+      service_s: 3.0  # 普通服务调用超时（秒）。
+      refined_s: 5.0  # 等待精化结果的超时上限（秒）。COLLECTING 时用满这个上限。有效 GraspDecision 在约 2.4s 内到齐；到不了的不再空等。

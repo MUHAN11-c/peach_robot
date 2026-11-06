@@ -1,0 +1,192 @@
+# ROS 2 构建产物
+build/
+install/
+log/
+# CTest 临时输出（只忽略生成目录，不影响各包 test/）
+Testing/
+
+# Python 环境（本机 venv，不随仓库分发）
+aubo_py3.12/
+**/.venv-yolo/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Node 前端测试依赖（vitest devDependencies，npm install 再生；aubo_ros2_web_dashboard）
+node_modules/
+
+# 工作空间归档（运行输出、厂商资料、一次性排查、大模型）
+_archive/
+
+# 厂商原始资料（体积大，本地保留；已迁入 _archive/vendor/）
+SDK资料/
+src.tar.xz
+
+# C/C++ 扩展 IntelliSense 数据库（可再生，可达数 GB）
+.vscode/browse.vc.db*
+
+# 工作区根目录调试产物（不入库）
+/debug/
+
+# rembg u2net 权重约 168MB，超过 Gitee 社区版单文件配额与 GitHub 100MB；
+# 本机文件保留不删。clone 后见
+# src/ivg/ivg_pose_estimation/models/README.md
+src/ivg/ivg_pose_estimation/models/*.onnx
+src/ivg/ivg_pose_estimation/models/*.pt
+# DINOv2 模板嵌入索引：由 template_index 按模板 mtime 重建的可再生产物
+src/ivg/ivg_pose_estimation/templates/*/.dinov2_index.npz
+# ivg_sim YCB meshes（全库约 118MB，models/fetch_ycb.sh 恢复；sdf/config 入库）
+src/ivg/ivg_sim/models/*/meshes/
+# MobileCLIP2 权重约 243MB，同样超单文件配额，本机保留
+/mobileclip2_b.ts
+
+# 工具/测试运行输出
+diagnostics/build/
+diagnostics/results/
+src/percipio_camera/depth_eval_out/
+test_results/
+harvest_runs/
+web_runs/
+peach_sessions/
+# 运行/测试过程数据与打包验收产物仅留本地；源码、文档、模型正常入库。
+/runs/
+/artifacts/
+# 报告保留文档与配图，排除制作中间产物、会话锁和原始统计数据。
+/reports/**/video_build/
+/reports/**/.dsh-ops-update-*.lock
+/reports/**/summary.csv
+/reports/**/summary.json
+src/serial_force/doc/sim/force_align_sim_trials.csv
+src/serial_force/doc/sim/force_align_sim_trials.jsonl
+recon_maps/*.ply
+validation_runs/
+# 手眼标定：hand_eye/active.yaml 是唯一在用外参事实源，入库随仓（09-17 唯一性整理；
+# 此前整目录被忽略导致标定仅存本机，工作区清理后只剩 _archive 副本）；
+# candidates/ 为标定会话产物，不入库
+src/aubo_hand_eye_calibration/hand_eye/candidates/
+release/
+rosbag2_*/
+
+# IDE 与工具缓存
+.vscode/
+.serena/
+.mimosa/
+**/.mimosa/
+.codegraph/
+.playwright-mcp/
+.patch_probe
+*.orig
+*~
+
+# AI 工具会话状态（本地保留，不入库）
+.cursor/
+.zcode/
+.v2c/
+.video_agent/
+.claude/
+**/.claude/
+.remember/
+
+# 复刻学习资料：官方免费 PDF 与配套源码体积大，本地保留不入库
+复刻学习资料/免费资源/*.pdf
+复刻学习资料/官方配套源码/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 战役产物：视频/录屏/bag 大件本地留存，文本分析入库
+campaign/**/*.mp4
+campaign/**/*.mcap
+campaign/**/*.bag
+campaign/**/*.png
+
+# HIL 会话 bag（plans/v1 三末端）：单文件可达 0.8–0.9GB，超 GitHub 100MB /
+# Gitee 社区单文件配额；json/jsonl/yaml/txt 仍入库。
+plans/**/*.mcap
+plans/**/*.bag
+
+# 场景预览图（ros2 run peach_sim scene_preview 生成，可复现，不入库）
+src/peach_sim/sim_worlds/worlds/*.preview.png
+
+# Blender 独立包（仅生成网格用，不入仓；colcon 用 COLCON_IGNORE 忽略）
+_tools/
+
+# Blender 场景工程与自动备份（151–205MB 超 100MB 推送上限，可由 tools/ 脚本重建）
+*.blend
+*.blend1
+
+# 感知验证矩阵 / field 锚定 / 中间建模轮次（可重渲；摘要以 matrix_* 前缀拷进 output/ 根）
+src/peach_sim/sim_worlds/reconstruction/output/matrix*/
+src/peach_sim/sim_worlds/reconstruction/output/depth_pop/
+src/peach_sim/sim_worlds/reconstruction/output/field_anchor/
+src/peach_sim/sim_worlds/reconstruction/output/modeling_*/
+src/peach_sim/sim_worlds/reconstruction/output/blender_tutorial/
+src/peach_sim/sim_worlds/reconstruction/output/**/*.exr
+src/peach_sim/sim_worlds/reconstruction/matrix/
+
+# peach_sim 重建生成物不入库
+src/peach_sim/sim_worlds/reconstruction/output/
+src/peach_sim/sim_worlds/reconstruction/output/lighting_checks/
+
+# 整园查看网格 field_no_grass.glb 单文件 ~620MB，超 Gitee/GitHub 配额，不入库
+# （2026-10-15 历史瘦身轮剔除全部历史版本）；本机文件保留，新克隆按
+# src/peach_sim/sim_worlds/README.md 的 Blender 重导出命令再生
+src/peach_sim/*/meshes/field_no_grass.glb
+
+# 上游参考库裸克隆（带 .git，本地构建/检索用；入库会变空 gitlink）
+external/
+# 官方示例子工作空间：本地克隆与指向 external/ 的符号链接，不入库
+src/examples/ros2_examples/
+src/examples/ros2_demos/
+src/examples/ros2_control_demos/
+src/examples/moveit2_tutorials/
+src/examples/moveit_resources/
+src/examples/ros_gz/
+src/examples/turtlebot3_msgs/
+src/examples/turtlebot3_simulations/
+src/examples/turtlebot3_navigation2
+src/examples/turtlebot3
+src/examples/turtlebot3_bringup
+src/examples/turtlebot3_cartographer
+src/examples/turtlebot3_description
+src/examples/turtlebot3_example
+src/examples/turtlebot3_node
+src/examples/turtlebot3_teleop
+src/examples/nav2_bringup
+src/examples/nav2_simple_commander
+src/examples/geometry_tutorials/
+src/examples/urdf_tutorial/
+src/examples/ros_tutorials/
+src/examples/navigation2_tutorials/
+src/examples/nav2_minimal_turtlebot_simulation/
+src/examples/ros_gz_project_template/
+src/examples/ros2_i_training/
+src/examples/study/
+
+# 视频工具中间产物（workspace 根 out/）
+/out/
+
+# v1.0.0 的交付夹具和精选验收基线为显式跟踪输入；其他 runs 输出继续忽略。
+!/runs/
+/runs/*
+!/runs/data/
+/runs/data/*
+!/runs/data/delivery_simulation_20261106/
+!/runs/analysis_reports/
+/runs/analysis_reports/*
+!/runs/analysis_reports/deployment_20261107/
+/runs/analysis_reports/deployment_20261107/*
+!/runs/analysis_reports/deployment_20261107/clean_room_summary.json
+!/runs/analysis_reports/deployment_20261107/clean_room_all_bag_reads.json
+!/runs/analysis_reports/deployment_20261107/clean_room_final_process_audit.json
+!/runs/analysis_reports/deployment_20261107/clean_room_source_audit.json
+!/runs/analysis_reports/deployment_20261107/deployment_scripts_flake8.log
+!/runs/analysis_reports/deployment_20261107/deployment_scripts_pep257.log
+!/runs/analysis_reports/deployment_20261107/test_cases_summary.json
+!/runs/analysis_reports/deployment_20261107/test_xml_inventory.json
+!/runs/releases/
+/runs/releases/*
+!/runs/releases/v1.0.0/
+/runs/releases/v1.0.0/*
+!/runs/releases/v1.0.0/baseline/

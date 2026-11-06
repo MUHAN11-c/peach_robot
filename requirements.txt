@@ -1,0 +1,85 @@
+# aubo_py3.12 venv 依赖清单（Python 3.12，--system-site-packages）
+#
+# 依赖分层原则（venv-first）：
+#   * ROS 2 依赖（rclpy / cv_bridge / tf2_ros / message_filters /
+#     sensor_msgs_py / ament_index_python / launch 等）来自 Jazzy apt
+#     官方源，不由本文件管理——这是 venv 隔离的物理边界。
+#   * 其余一切第三方 Python 库统一由本文件钉版本安装：
+#       aubo_py3.12/bin/pip install -r requirements.txt
+#     （对带 --system-site-packages 的 venv，apt 同名包存在时需加
+#     --ignore-installed 才会真正落入 venv。）
+#
+# 关键 ABI 约束：numpy 必须 <2 且 ==1.26.4。Jazzy 的 cv_bridge 二进制按
+# numpy 1.x 编译；出现 numpy 2.x 时 import cv2 报
+# "numpy.core.multiarray failed to import"，import cv_bridge 直接段错误。
+# 1.26.4 同时是 apt python3-numpy 的版本，双路径一致。
+#
+# 版本锁定基准：2026-07-30 本机实测；2026-09-02 补钉 scipy/PyYAML 入 venv
+# （与 apt python3-scipy/python3-yaml 同版本，仅隔离位置）。
+# 已知遗留：pip check 会报若干 types-*/pynacl 等 dev-stub 缺伴依赖，为
+# venv 内与本项目无关的历史包，不参与运行时。
+
+numpy==1.26.4
+# torch 2.13 requires setuptools>=77.0.3; colcon-core 0.21 requires setuptools<80.
+setuptools==78.1.0
+scipy==1.11.4
+PyYAML==6.0.1
+opencv-python==4.11.0.86
+matplotlib==3.11.1
+
+# ---- peach_perception 感知节点（YOLO + MobileSAM via ultralytics） ----
+torch==2.13.0
+torchvision==0.28.0
+ultralytics==8.3.0
+ultralytics-thop==2.1.5
+tqdm==4.67.1
+
+# ---- peach_perception 重建节点（Open3D 点云/TSDF） ----
+open3d==0.19.0
+
+# ---- visual_pose_estimation_python Web 回归测试（TestClient；2026-09-08 补钉） ----
+httpx==0.27.2
+
+# ---- visual_pose_estimation_python rembg 抠图（进程内；2026-09-08 补钉） ----
+# rembg 自身必须 --no-deps 安装（其元数据未给 numpy 设上限，裸装会把 numpy
+# 拉到 2.x 破坏 cv_bridge ABI）：
+#   aubo_py3.12/bin/pip install --no-deps rembg==2.0.61
+# 其运行依赖由下面几行提供；pymatting 1.1.15 要求 numba>=0.60.0。
+# 固定 numba 0.60.0 / llvmlite 0.43.0，兼容 Python 3.12 与 numpy 1.26.4：
+# https://numba.readthedocs.io/en/0.60.0/user/installing.html#version-support-information
+# u2net 权重经 U2NET_HOME 指向包内 models/（不入 ~/.u2net）；
+# 约 168MB，超远程单文件上限不入库，见该目录 README / fetch_u2net.sh。
+onnxruntime==1.20.1
+pooch==1.8.2
+pymatting==1.1.15
+numba==0.60.0
+llvmlite==0.43.0
+# contact_graspnet_lib（ivg_graspnet vendored 后端）依赖：纯 python，numpy 1.x 兼容
+trimesh==4.5.3
+
+# ---- matplotlib 传递依赖（保证绘图环境可复现） ----
+contourpy==1.3.3
+cycler==0.12.1
+fonttools==4.63.0
+kiwisolver==1.5.0
+packaging==26.2
+pillow==12.3.0
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+six==1.17.0
+
+# ---- Web 服务与纯核测试框架（2026-09-15 补钉：venv 早已在装、本文件此前漏钉，
+# 全新环境按本文件装会缺 fastapi → peach_executor Web 起不来） ----
+fastapi==0.101.0
+starlette==0.27.0  # fastapi 0.101 兼容上限；starlette>=1.0 删除 on_startup 会炸网关 APIRouter
+uvicorn==0.27.1
+# aubo_ros2_web_dashboard 网关 WebSocket 代理依赖（2026-09-30 移植补钉；
+# 12.0 与 aubo_boot install_requires 下限一致，legacy client API 可用）
+websockets==12.0
+pytest==7.4.4
+pytest-cov==4.1.0
+
+# ---- vendored camera_calibration（image_pipeline jazzy 分支）标定器依赖
+# （2026-09-17 补钉）：calibrator.py 用 VersionInfo 比较 OpenCV 版本；
+# 纯 Python 无传递依赖。CI 侧由该包 package.xml 的 python3-semver rosdep 键走 apt。
+semver==3.0.2

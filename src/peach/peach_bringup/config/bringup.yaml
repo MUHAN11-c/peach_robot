@@ -1,0 +1,14 @@
+# peach_bringup 部署参数（节点块 = 节点名；launch 以 ParameterFile 装入）
+# 声明与校验规则：config/autostart_parameters.yaml 与 config/flag_bridge_parameters.yaml（GPL）。
+# 运行期临时改参：ros2 param set——autostart 的 scene_key/intent 读取时生效；
+# flag_bridge 的 poll_hz / is_active_service 构造期捕获，改后需重启节点。
+peach_lifecycle_flag_bridge:
+  ros__parameters:
+    is_active_service: /peach_lifecycle_manager/is_active  # nav2_lm is_active 服务名（轮询桥为闩锁 Bool）
+    poll_hz: 1.0  # 轮询频率 (Hz)
+peach_autostart_client:
+  ros__parameters:
+    scene_key: default  # 自动开批 RunHarvest 的 scene_key
+    intent: 0  # RunHarvest intent（0=INTENT_PICK_ALL）
+    wait_stack_timeout_s: 90.0  # 等托管栈、自检和 action server 的总墙钟期限 (s)
+    require_selfcheck: true  # 自动开批硬等自检绿（/peach/observability/selfcheck_passed 闩锁）；false=不等（手动 RunHarvest 恒不受限）

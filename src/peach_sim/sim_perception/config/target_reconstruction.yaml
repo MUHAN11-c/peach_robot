@@ -1,0 +1,21 @@
+# Simulation-only overlay. Load the current peach_target_reconstruction full YAML first.
+peach_target_reconstruction_node:
+  ros__parameters:
+    use_sim_time: true
+    calibration_version: 'gazebo:ideal-640x480-hfov63-depth-m|handeye:harvester_unified-xacro'
+    depth_scale_unit: 1.0
+    frames:
+      base_frame: base_link
+    capture:
+      min_views: 1
+      require_robot_static: true
+      max_frame_age_s: 12.0
+      mask_stamp_tolerance_s: 0.45  # Current shared parameter schema permits at most 0.5 s.
+      auto_mode: true
+    icp:
+      enable: false
+    session:
+      # Launch must override this with the absolute run_directory/vision path.
+      # Requiring the project runner environment prevents the shared default
+      # (workspace-level runs/) from writing outside peach_sim.
+      root_dir: '$(env PEACH_SIM_RUN_DIRECTORY)/vision'

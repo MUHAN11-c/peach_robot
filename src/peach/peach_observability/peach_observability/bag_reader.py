@@ -1,0 +1,199 @@
+"""
+MCAP 会话读取与反序列化：bag → {topic: [(t_ns, dict|None)]}.
+
+rosbag2_py / rclpy.serialization / rosidl_runtime_py 全部延迟导入，本模块
+可在无 ROS 上下文下被导入（调用读取才需要 source Jazzy + install）。
+metadata.yaml 缺失（kill -9 等非正常退出）时用 rosbag2_py.Reindexer 进程内
+兜底重建索引后重读，不执行外部命令。
+
+转换约定：HEAVY_TOPICS 中三个固定图像/点云话题只留时间戳（dict 恒 None）；
+其余消息按类型转换——CanonicalEvent/PeachTargetObservationArray 复用
+state 的既有转换（与旧 jsonl 字段一致），其余走通用 dict 转换（bytes
+字段折叠为 ``{'byte_count': n}``，数值数组保留）。读取仍将全部流保存在
+内存，非固定话题名的图像/点云不会仅因类型相同而自动跳过转换。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+# 报告只需时间戳的话题（全量 dict 转换会拖慢且无分析价值）
+HEAVY_TOPICS = (
+    '/peach/perception/debug_image',
+    '/peach/perception/debug_image_raw',
+    '/peach/reconstruction/tsdf_cloud',
+)
+
+# 重命名/删除 IDL 或话题时的兼容登记处（清洁重写轮引入）。
+# 每删/改一个类型或图名，在这里登记「旧 bag 字面量 → 现行名」一行，
+# 旧 bag 回放不静默断；别名目标必须是字段兼容的现行类型。
+# JobIntent（2026-09-16 阶段 6-2 删除）：常量并入 RunHarvest.action，bag 中
+# 类型引用经此映射到 HarvestState（最近字段兼容载体——JobIntent 为纯常量
+# 包，bag 中通常不出现该类型名；如有独立话题录制则须重封基线）。
+LEGACY_TYPE_ALIASES: dict[str, str] = {
+    'peach_interfaces/msg/JobIntent': 'peach_interfaces/msg/HarvestState',
+}
+LEGACY_TOPIC_ALIASES: dict[str, str] = {
+    # 节点改名（阶段 6-3）：旧 bag 话题前缀 → 新名
+    '/peach_executor/state': '/peach_supervisor/state',
+    '/peach_executor/events': '/peach_supervisor/events',
+    '/peach_executor/scene_snapshot': '/peach_supervisor/scene_snapshot',
+    '/peach_executor/run_harvest': '/peach_supervisor/run_harvest',
+    '/peach_executor/control': '/peach_supervisor/control',
+}
+
+
+def ensure_index(bag_dir) -> Path:
+    """metadata.yaml 缺失时用 rosbag2_py.Reindexer 兜底重建；返回 bag 目录."""
+    from rosbag2_py import Reindexer, StorageOptions
+
+    bag = Path(bag_dir)
+    if (bag / 'metadata.yaml').exists():
+        return bag
+    try:
+        Reindexer().reindex(
+            StorageOptions(uri=str(bag), storage_id='mcap'))
+    except Exception as error:  # noqa: BLE001 rosbag2 存储层异常类型不定
+        raise RuntimeError(f'reindex 失败（{bag}）: {error}') from error
+    if not (bag / 'metadata.yaml').exists():
+        raise RuntimeError(f'reindex 后仍缺 metadata.yaml（{bag}）')
+    return bag
+
+
+def type_name_of(message) -> str:
+    """消息实例 → rosbag2 类型串；录制器通过 message_type_name 别名复用."""
+    cls = type(message)
+    namespaces = cls.__module__.split('.')[:-1]
+    if (len(namespaces) < 2 or namespaces[1] not in {'msg', 'srv', 'action'}
+            or not hasattr(cls, 'SLOT_TYPES')):
+        raise ValueError(f'不是生成的 ROS 消息类型: {cls.__module__}.{cls.__name__}')
+    return '/'.join((*namespaces, cls.__name__))
+
+
+# 旧录制器曾把 action 生成消息误写进 msg 命名空间（如 RunHarvest_FeedbackMessage）；
+# rosidl get_message 只认真实的 action 命名空间；按后缀兼容旧 bag。仍失败的类型折叠为
+# 「仅时间戳」（单个未知类型不断整份报告——全量录制订阅域内全部话题）。
+_ACTION_MSG_SUFFIXES = ('_FeedbackMessage', '_Goal', '_Result')
+# 「类型解析失败」哨兵：与合法 msg 类型区分开，整袋只解析一次
+_UNRESOLVED = object()
+
+
+def action_fallback_name(type_name: str) -> str | None:
+    """``pkg/msg/<Name>_FeedbackMessage`` → ``pkg/action/<Name>_FeedbackMessage``."""
+    parts = type_name.split('/')
+    if len(parts) == 3 and parts[1] == 'msg':
+        for suffix in _ACTION_MSG_SUFFIXES:
+            if parts[2].endswith(suffix):
+                return f'{parts[0]}/action/{parts[2]}'
+    return None
+
+
+def message_class(type_name: str):
+    """类型串 → 消息类；action 后缀回退到 action 命名空间，失败给 None."""
+    from rosidl_runtime_py.utilities import get_message
+    try:
+        return get_message(type_name)
+    except (AttributeError, ImportError, LookupError, ValueError):
+        fallback = action_fallback_name(type_name)
+        if fallback is None:
+            return None
+        try:
+            return get_message(fallback)
+        except (AttributeError, ImportError, LookupError, ValueError):
+            return None
+
+
+def _to_dict(value):
+    """
+    消息/字段递归转 dict；bytes 折叠为 byte_count（不展开图像原始数据）.
+
+    rclpy 消息槽名带下划线前缀（``_data``/``_header``），此处统一剥掉，
+    使键名与消息字段名（data/header/…）一致。
+    """
+    import array
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        return {'byte_count': len(value)}
+    if isinstance(value, array.array):
+        return value.tolist()
+    # rosidl fixed numeric arrays use numpy.ndarray (numpy stays at 1.26.4).
+    if type(value).__module__.startswith('numpy') and hasattr(value, 'tolist'):
+        return _to_dict(value.tolist())
+    if isinstance(value, (list, tuple)):
+        return [_to_dict(item) for item in value]
+    slots = getattr(value, '__slots__', None)
+    if slots:
+        return {
+            slot.lstrip('_'): _to_dict(getattr(value, slot))
+            for slot in slots
+        }
+    return str(value)
+
+
+def read_bag(bag_dir, *, stamps_only=HEAVY_TOPICS) -> dict:
+    """
+    读一个 bag：返回 {topic: [(t_ns, dict|None), ...]}（bag 原序，即写入序）.
+
+    stamps_only 中（默认图像/点云）的话题只记时间戳。
+    """
+    from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
+    from rclpy.serialization import deserialize_message
+
+    from .state import (
+        to_grasp_decision,
+        to_grasp_hypothesis,
+        to_harvest_event,
+        to_reconstruction_status,
+        to_target_observations,
+    )
+
+    # 类型化转换表：循环外构造一次（原实现逐消息重建 5 键 dict + 跨模块查找）
+    converters = {
+        'peach_interfaces/msg/CanonicalEvent': to_harvest_event,
+        'peach_interfaces/msg/PeachTargetObservationArray':
+            to_target_observations,
+        'peach_interfaces/msg/ReconstructionStatus':
+            to_reconstruction_status,
+        'peach_interfaces/msg/GraspDecision': to_grasp_decision,
+        'peach_interfaces/msg/GraspHypothesis': to_grasp_hypothesis,
+    }
+
+    bag = ensure_index(bag_dir)
+    reader = SequentialReader()
+    reader.open(
+        StorageOptions(uri=str(bag), storage_id='mcap'),
+        ConverterOptions(
+            input_serialization_format='cdr',
+            output_serialization_format='cdr'))
+    topic_types = {
+        item.name: item.type for item in reader.get_all_topics_and_types()}
+    type_cache: dict[str, type] = {}
+    streams: dict[str, list] = {}
+    while reader.has_next():
+        raw_topic, data, t_ns = reader.read_next()
+        topic = LEGACY_TOPIC_ALIASES.get(raw_topic, raw_topic)
+        records = streams.setdefault(topic, [])
+        if topic in stamps_only:
+            records.append((int(t_ns), None))
+            continue
+        msg_type = type_cache.get(topic)
+        if msg_type is _UNRESOLVED:
+            records.append((int(t_ns), None))
+            continue
+        if msg_type is None:
+            type_name = topic_types.get(raw_topic)
+            if type_name is None:
+                continue
+            type_name = LEGACY_TYPE_ALIASES.get(type_name, type_name)
+            msg_type = message_class(type_name)
+            if msg_type is None:
+                type_cache[topic] = _UNRESOLVED
+                records.append((int(t_ns), None))
+                continue
+            type_cache[topic] = msg_type
+        message = deserialize_message(data, msg_type)
+        converter = converters.get(type_name_of(message))
+        records.append(
+            (int(t_ns), converter(message) if converter else _to_dict(message)))
+    return streams

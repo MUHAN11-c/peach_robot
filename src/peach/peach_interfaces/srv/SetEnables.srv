@@ -1,0 +1,15 @@
+# 操作台使能开关（清洁重写轮契约，阶段 3 接线）。
+# 服务：/peach_supervisor/set_enables
+# 服务端：peach_supervisor    客户端：单步调试 POST /api/debug/set_enables_service，或 ros2 service call
+# 意图源=大脑（变更广播 /peach/batch/enables，transient_local，并写审计）；
+# 强制点=臂侧命令门；execution/grasp/tool 启动默认全关，由操作台运行时切换。
+
+# === Request ===
+bool execution
+bool grasp
+bool tool
+string reason                  # 人读原因，写入审计
+---
+# === Response ===
+bool accepted
+string message                 # 拒绝原因

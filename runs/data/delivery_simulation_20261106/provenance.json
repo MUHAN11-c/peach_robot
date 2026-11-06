@@ -1,0 +1,60 @@
+{
+  "source_bag": "runs/data/ros2_web_live_camera_mock_20261028/capture_before_camera_off/peach_rgbd_mock_60s",
+  "source_rgb_index": 2,
+  "selection": "Original RGB/depth/cloud exposure stamps exactly equal; no retiming.",
+  "sensor_stamp_ns": {
+    "/camera/color/image_raw": 1793181248439054000,
+    "/camera/depth/image_raw": 1793181248439054000,
+    "/camera/depth_registered/points": 1793181248439054000,
+    "/camera/depth/camera_info": 1793181248439054000,
+    "/camera/color/camera_info": 1793181248439054000
+  },
+  "perception_inputs_source": "runs/data/peach_fps_audit_20261026/inputs",
+  "purpose": "Frozen-camera mock replay and offline perception; no hardware required.",
+  "files": {
+    "perception_inputs/frame_00.npz": {
+      "bytes": 508970,
+      "sha256": "f006994fce666ce7241e6c6d5af06edabb59130ed6b234cb8e8232c2bf8e0f9a"
+    },
+    "perception_inputs/frame_01.npz": {
+      "bytes": 506260,
+      "sha256": "1b3c758109889cceae7ccf9754a2bf0abdc0279f80c89d90f6057b5d9da3cd6a"
+    },
+    "perception_inputs/frame_02.npz": {
+      "bytes": 510920,
+      "sha256": "4178d651a8650e293119f536835881af25b9bcb7f51dfd9eba0531f2712bf61e"
+    },
+    "perception_inputs/frame_03.npz": {
+      "bytes": 507741,
+      "sha256": "73f49943407409dc0d1799f08f0cd73a20029b7457416517c2c59443ba5991f0"
+    },
+    "perception_inputs/frame_04.npz": {
+      "bytes": 507631,
+      "sha256": "9a6f17bf6c7084bc41c13256df38b2dc377d51b3113faec0dbb53e20ee6e543e"
+    },
+    "perception_inputs/frame_05.npz": {
+      "bytes": 508386,
+      "sha256": "480d8e75ec1ebff4ae8c4cec0f235f67275c67949862c93ac6bca837e2d6fd43"
+    },
+    "perception_inputs/frame_06.npz": {
+      "bytes": 508017,
+      "sha256": "11d2d0f2eb3dfb11e0b9ffe4d2723887d1ce4e1d700e729536edd87e49876ec3"
+    },
+    "perception_inputs/frame_07.npz": {
+      "bytes": 508512,
+      "sha256": "c53f8f7808e5a3703d9143b304332e4e08ab10420abf1115e4a23fb49e530815"
+    },
+    "prepare_sample.py": {
+      "bytes": 3123,
+      "sha256": "b1190dcddb535af039ec934f321fcb4962ebc48d05f82329c8b0968670f9d6c6"
+    },
+    "rgbd_frame_bag/metadata.yaml": {
+      "bytes": 1707,
+      "sha256": "1173d87d01756be10707620e8e2c156a2d711f9bce4aea05c196300dc0c76d6a"
+    },
+    "rgbd_frame_bag/rgbd_frame_bag_0.mcap": {
+      "bytes": 5693738,
+      "sha256": "f8b494d3be79988d95ce4707506c8b6e20aba3d4645da5184d85188868ace029"
+    }
+  }
+}

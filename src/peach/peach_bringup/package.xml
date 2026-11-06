@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd"
+  schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>peach_bringup</name>
+  <version>0.1.0</version>
+  <description>整栈组合入口：Include 只读 aubo_e5_bringup；nav2_lm 托管；autostart 参数（授权=操作员发起 launch）。</description>
+  <maintainer email="2155413529@qq.com">wjz</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>generate_parameter_library_py</depend>
+
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>aubo_e5_bringup</exec_depend>
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>joint_state_broadcaster</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>moveit_configs_utils</exec_depend>
+  <exec_depend>moveit_ros_move_group</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>peach_arm</exec_depend>
+  <exec_depend>peach_common</exec_depend>
+  <exec_depend>peach_scene_perception</exec_depend>
+  <exec_depend>peach_target_reconstruction</exec_depend>
+  <exec_depend>peach_supervisor</exec_depend>
+  <exec_depend>peach_scene_obstacles</exec_depend>
+  <exec_depend>peach_interfaces</exec_depend>
+  <exec_depend>peach_observability</exec_depend>
+  <exec_depend>peach_stereo</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>peach_rviz_plugins</exec_depend>
+  <exec_depend>ros2_web_link</exec_depend>
+  <exec_depend>serial_force</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

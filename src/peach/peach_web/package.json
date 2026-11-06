@@ -1,0 +1,12 @@
+{
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "three": "0.186.1"
+  },
+  "name": "peach-web-assets",
+  "private": true,
+  "scripts": {
+    "build:vendor": "esbuild scripts/three-entry.js --bundle --format=iife --global-name=PeachThree --minify --legal-comments=linked --outfile=web/vendor/peach-three.js",
+    "test": "node -e \"console.log('peach_web: colcon test runs ament lint; open the page in a browser')\""
+  }
+}

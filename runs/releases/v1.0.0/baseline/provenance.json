@@ -1,0 +1,45 @@
+{
+  "origin": "2026-11-07 02:44 Asia/Shanghai validation; unchanged copied evidence",
+  "files": {
+    "clean_room.json": {
+      "source": "/home/wjz/peach_robot/clean_room_20261107/clean_room.json",
+      "sha256": "59ac108634e4e1c6ca2a24b5ddff27734e8545afb3d6e865d13f4cf9ebd1f82c"
+    },
+    "verification.json": {
+      "source": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification_20261106T184137Z/verification.json",
+      "sha256": "e58443a25ef2ef94676e8b09b7178d04918c1089e3c176d8cfa004b4eea25f6b"
+    },
+    "environment.json": {
+      "source": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification_20261106T184137Z/environment.json",
+      "sha256": "43c9c24890a2176e2761934ec5eaf289e1b82060aa7fe7924c733a1bfc0d9768"
+    },
+    "readonly_mock.json": {
+      "source": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification_20261106T184137Z/readonly_mock/report.json",
+      "sha256": "45770ce95d50271977e518f2e51f592eb07ff76ef96036b169560cb79f8e9195"
+    },
+    "websocket.json": {
+      "source": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification_20261106T184137Z/readonly_mock/websocket.json",
+      "sha256": "135a55075133063432e11338c7be1cdeb2ddf116302bf62e09eac90e8ba3df46"
+    },
+    "web_e2e.json": {
+      "source": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification_20261106T184137Z/readonly_mock/web_e2e/report.json",
+      "sha256": "b04628580dcbe60cdc3665331c38761b3a11f8fd105078976ff00beb88abcc6f"
+    },
+    "frozen_grasp.json": {
+      "source": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification_20261106T184137Z/frozen_grasp/report.json",
+      "sha256": "18f1d5dfaa81f427ec231d2d36ab9b8fc3dacfa87467e8cdc81c24b98e7a32f7"
+    },
+    "frozen_grasp.log": {
+      "source": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification_20261106T184137Z/frozen_grasp/run.log",
+      "sha256": "288ebc1dc3b71b2a44180f02d5cf5786e70fc6da3102b53d16417acbc9de78cc"
+    },
+    "recordings.json": {
+      "source": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification_20261106T184137Z/recordings.json",
+      "sha256": "78f2ba027cc7f0deffaa6e0e6a404cb3d2230a4a90ac8a04cc646e4712522729"
+    },
+    "monitor_1440.png": {
+      "source": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification_20261106T184137Z/readonly_mock/web_e2e/monitor_1440.png",
+      "sha256": "4a9ec938ee3bc476c9ebcd53d26e3bb467b514f9c36079e9280c360295de4c17"
+    }
+  }
+}

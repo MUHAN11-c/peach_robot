@@ -1,0 +1,62 @@
+rosbag2_bagfile_information:
+  version: 9
+  storage_identifier: mcap
+  duration:
+    nanoseconds: 0
+  starting_time:
+    nanoseconds_since_epoch: 1793181248439054000
+  message_count: 5
+  topics_with_message_count:
+    - topic_metadata:
+        name: /camera/depth/camera_info
+        type: sensor_msgs/msg/CameraInfo
+        serialization_format: cdr
+        offered_qos_profiles:
+          []
+        type_description_hash: ""
+      message_count: 1
+    - topic_metadata:
+        name: /camera/depth_registered/points
+        type: sensor_msgs/msg/PointCloud2
+        serialization_format: cdr
+        offered_qos_profiles:
+          []
+        type_description_hash: ""
+      message_count: 1
+    - topic_metadata:
+        name: /camera/color/camera_info
+        type: sensor_msgs/msg/CameraInfo
+        serialization_format: cdr
+        offered_qos_profiles:
+          []
+        type_description_hash: ""
+      message_count: 1
+    - topic_metadata:
+        name: /camera/depth/image_raw
+        type: sensor_msgs/msg/Image
+        serialization_format: cdr
+        offered_qos_profiles:
+          []
+        type_description_hash: ""
+      message_count: 1
+    - topic_metadata:
+        name: /camera/color/image_raw
+        type: sensor_msgs/msg/Image
+        serialization_format: cdr
+        offered_qos_profiles:
+          []
+        type_description_hash: ""
+      message_count: 1
+  compression_format: ""
+  compression_mode: ""
+  relative_file_paths:
+    - rgbd_frame_bag_0.mcap
+  files:
+    - path: rgbd_frame_bag_0.mcap
+      starting_time:
+        nanoseconds_since_epoch: 1793181248439054000
+      duration:
+        nanoseconds: 0
+      message_count: 10
+  custom_data: ~
+  ros_distro: jazzy

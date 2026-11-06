@@ -1,0 +1,98 @@
+# peach_observability 参数全量清单（nav2 式：launch 以 ParameterFile 装入，部署值即事实源）
+# 声明来自 observability_parameters.yaml；本文件提供部署值。
+# ObservabilityParams.attach 同步合法参数，端口/订阅/录制等资源按生命周期重建。
+# 键名冻结。yaml 随包走（W11 起从 peach_harvester/config 迁入，实现包自持清单）。
+peach_observability:
+  ros__parameters:
+    host: 127.0.0.1  # HTTP 监听地址；局域网访问显式设 0.0.0.0
+    port: 8090  # HTTP 监听端口
+    startup_facts: ''  # harvest_system 注入的启动事实 JSON（含 hardware_mode/git 等；空=独立起栈，自检参数一致性项降级）
+    robot_status_probe_enabled: false  # 自检 robot_status 新鲜度探针（真机 launch 置 true；mock 不要求）
+    selfcheck:
+      enabled: true  # 启动自检总开关：探针+周期检查+闩锁 selfcheck_passed+会话工件
+      period_s: 30.0  # 周期复检间隔（秒）；0=只跑初次+8090 手动
+      initial_settle_s: 10.0  # managed 旗标置位后静置等待（模型加载/MoveIt 就绪）
+      initial_timeout_s: 90.0  # 旗标未到的初次检查兜底超时（秒）
+      rate_window_s: 5.0  # 帧率探针滑动窗（秒）
+      camera_probe_enabled: false  # 相机帧率探针（camera_enabled 时 launch 置 true）
+      camera_min_hz: 2.0  # 图像探针接收到达率告警阈值；低率仅 WARN，不判采集失败、不拦开批
+      disk_min_gb: 10.0  # runs 根所在盘最低剩余（GB；bag 预算 100G 的安全垫）
+      expected_joints: [shoulder_joint, upperArm_joint, foreArm_joint, wrist1_joint, wrist2_joint, wrist3_joint]  # MUST 冻结序（AGENTS 第 1 章）
+      expected_tcp_norm_m: -1.0  # wrist3_Link→tcp 平移模长期望（米）；-1=跳过；harvest_system 从 aubo_description 工具档案算好注入
+      moveit_expected: true  # 是否要求 move_group 在场（launch 按 moveit_enabled 注入）
+      force_expected: true  # 是否要求 /force/points 在场（launch 按 force_enabled 注入）
+      model_paths: ''  # 启动期须在位的模型权重路径（逗号分隔；空=SKIP；部署档可填 yolo/sam 权重绝对路径）
+      color_image_topic: /camera/color/image_raw  # 相机帧率探针 color 话题
+      depth_image_topic: /camera/depth/image_raw  # 相机帧率探针 depth 话题
+    param_poll_period_s: 3.0  # 各节点当前参数只读镜像的轮询周期（秒）
+    target_observations_topic: /peach/perception/target_observations  # 全局目标快照话题
+    harvest_state_topic: /peach/perception/harvest_state  # 采摘计划 JSON 话题
+    reconstruction_status_topic: /peach/reconstruction/status  # 重建状态话题
+    reconstruction_diagnostics_topic: /peach/reconstruction/diagnostics  # 重建结构化诊断话题
+    reconstruction_diagnostics_debug_topic: /peach/reconstruction/diagnostics_debug  # 重建调试明细 JSON 话题（镜像合并补充）
+    grasp_decision_topic: /peach/reconstruction/grasp_decision  # 抓取许可话题
+    refined_pose_topic: /peach/reconstruction/refined_pose  # 精化位姿话题
+    refined_axis_topic: /peach/reconstruction/refined_axis  # 精化轴线话题
+    refined_diagnostics_topic: /peach/reconstruction/refined_diagnostics  # 精化质量话题
+    manipulation_status_topic: /peach_arm/status  # 机械臂技能节点状态 JSON 话题
+    grasp_hypothesis_topic: /peach/manipulation/grasp_hypothesis  # 技能侧抓取假设（只读监控，不构成运动指令）
+    task_executor_state_topic: /peach_supervisor/state  # 调度节点类型化状态话题
+    task_executor_events_topic: /peach_supervisor/events  # 调度过程/审计事件话题（事件时间线）
+    robot_status_topic: /aubo_io_controller/robot_status  # 机械臂上电/急停/运动/错误状态话题
+    joint_states_topic: /joint_states  # 实际关节角/速度（sensor_msgs/JointState）
+    joint_status_topic: /aubo_io_controller/joint_status  # 关节电流/温度/跟随误差（aubo_msgs/JointStatus）
+    tf_topic: /tf  # 动态 TF 话题（录制末端轨迹离线重算用）
+    tf_static_topic: /tf_static  # 静态 TF 话题（transient_local）
+    scene_snapshot_topic: /peach_supervisor/scene_snapshot  # 调度场景快照话题（bag 专用，监控不镜像）
+    job_topic: /peach/observability/job  # 作业票 JSON 派生话题（指纹变化发布，随 bag 录制）
+    metrics_topic: /peach/observability/metrics  # 性能采样 JSON 派生话题（1s 发布，随 bag 录制）
+    event_buffer_size: 100  # 事件时间线环形缓冲上限（条），超出丢弃最旧
+    log_buffer_size: 200  # /api/state.logs 环形缓冲（条）：/rosout 的 stamp/level/name/msg，超出丢最旧；消息截断 400 字。页面按级别阈值与节点名过滤，不进图像或点云
+    metrics_period_s: 1.0  # 系统/GPU/进程性能采样周期（秒），独立线程采集
+    metrics_process_patterns: [peach_scene_perception_node, peach_target_reconstruction_node, peach_arm, peach_supervisor, ros2_control_node, percipio]  # 执行入口/ROS节点名精确匹配；宿主同名取RSS最大者
+    record:
+      enabled: true  # 会话 bag 录制总开关（栈启动开 runs/session_*/bag，栈停止关 bag 并自动出报告）
+      root_dir: ''  # 过程数据根；空=工作区 runs/（与账本、session 同一目录）
+      save_images: true  # 非 all 档仅允许稳定 debug_image 在结果关键段进 bag；all 档两幅预览图均送袋，不由此开关过滤
+      save_clouds: true  # 固定TSDF专用订阅开关；std/all发现订阅仍可能补录点云，std媒体只留关键段
+      rosout: true  # /rosout 日志送入 bag；受写队列/错误计数约束，页面日志环独立于此开关
+      level: std  # std=固定订阅+发现白名单，感知媒体仅关键段约3秒/1Hz；all放开发现白名单和媒体窗口，仍保留排除集与控制流等限速；core仅固定订阅集
+      max_total_bag_gb: 100.0  # bag总量预算（GiB）：session_*/bag 与旧 mcap_* 合计，仅删已封口目录、按mtime从旧到新；0禁用。先刷盘审计，报告/账本不删；显式分析后清理用 retention.purge_analyzed_sessions
+      queue_depth: 512  # 队列项上限：满时媒体丢自身，其它数据淘汰最旧数据；控制屏障保留；队列丢弃数在 record.info.drops
+    trajectory:
+      enabled: true  # 采样末端 TCP 轨迹供 Web/路标（latest TF base←tip；bag 侧由 /tf 离线重算，同一来源）
+      base_frame: base_link  # 轨迹参考系（与 GraspDecision 入口同系）
+      tip_frame: tcp  # 规划/工具末端连杆（URDF tip）
+      period_s: 0.05  # TF 采样周期（秒）；约 20 Hz
+      min_step_m: 0.003  # 静止丢弃阈值（米）；位移小且未运动则不写点
+      max_points: 8000  # 内存环形缓冲上限（点）
+    debug_image_topic: /peach/perception/debug_image  # 感知调试叠加图话题（bgr8）
+    debug_image_raw_topic: /peach/perception/debug_image_raw  # RGB-D入口无注解实时预览（不受motion/inference门控），不进 RViz
+    tsdf_cloud_topic: /peach/reconstruction/tsdf_cloud  # 在线 TSDF 点云话题（latched）
+    tcp_path_topic: /peach/observability/tcp_path  # 末端 TCP 轨迹 nav_msgs/Path（RViz Path，latched）
+    tcp_markers_topic: /peach/observability/markers  # 末端轨迹/入口/预抓取 visualization_msgs/MarkerArray（与重建 markers 同契约）
+    debug:
+      enabled: true  # 普通调试转发/参数写入开关；只读 selfcheck 另由 selfcheck.enabled 控制；不作为 WS 后端授权层
+      motion_enabled: false  # HTTP运动类含所有RunHarvest（含SURVEY_ONLY）、Survey、非PREVIEW Execute、photo/arm、恢复控制及开启使能；拒绝423。参数桥对运动项逐项拒绝
+      action_timeout_s: 180.0  # 动作结果等待上限（秒）；服务 10 秒
+      audit_enabled: true  # 调试操作审计落盘 runs/debug_audit/<日期>.jsonl（含被拒请求）
+    debug.endpoints:
+      run_harvest_action: /peach_supervisor/run_harvest  # RunHarvest 动作名
+      control_service: /peach_supervisor/control  # ControlTask 服务名
+      begin_scene_service: /peach_scene_perception_node/begin_scene  # BeginScene 服务名
+      survey_action: /peach_arm/survey_scene  # SurveyScene 动作名
+      execute_action: /peach_arm/execute_target  # ExecuteTarget 动作名
+      build_action: /peach_target_reconstruction_node/build_target_model  # BuildTargetModel 动作名
+      check_reachability_service: /peach_arm/check_reachability  # CheckReachability 服务名
+      photo_pose_service: /peach_arm/go_to_photo_pose  # 去拍照位 Trigger 服务名
+      preview_approach_service: /peach_arm/preview_approach_insert  # 只规划接近+插入 Trigger 服务名
+      preview_full_service: /peach_arm/preview_full_contact  # 只规划全接触 Trigger 服务名
+      ack_recovery_service: /peach_arm/acknowledge_recovery  # 确认恢复 Trigger 服务名
+      arm_service: /peach_arm/set_execution_armed  # 执行 arm 开关 SetBool 服务名
+      skill_cancel_service: /peach_arm/cancel_cycle  # 技能周期取消 Trigger 服务名
+      recon_save_session_service: /peach_target_reconstruction_node/save_session  # 重建会话落盘 Trigger 服务名
+      recon_reset_service: /peach_target_reconstruction_node/reset_reconstruction  # 重建复位 Trigger 服务名
+      recon_finalize_service: /peach_target_reconstruction_node/finalize_reconstruction  # 重建手动 finalize Trigger 服务名
+      recon_query_service: /peach_target_reconstruction_node/query_reconstruction_state  # 重建状态查询服务名
+      manage_nodes_service: /peach_lifecycle_manager/manage_nodes  # 整栈生命周期管理服务名
+      set_enables_service: /peach_supervisor/set_enables  # 执行/抓取/工具运行期开关

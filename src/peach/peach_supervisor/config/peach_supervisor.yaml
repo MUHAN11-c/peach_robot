@@ -1,0 +1,31 @@
+# peach_supervisor 参数全量清单（nav2 式：launch 以 ParameterFile 装入，部署值即事实源）
+# GPL schema 声明参数并经 SupervisorParams 实时读取；本文件提供部署覆盖值。
+# 键名冻结。tool.profile_id 基础值为 adaptive_shear_v1，整栈由 tool_profile 覆盖。
+peach_supervisor:
+  ros__parameters:
+    execution_enabled: false  # false 时 WAIT_LOCK 后直接结算，不选目标、不派 ExecuteTarget。
+    survey_wait_s: 15.0  # BeginScene 后等待本世代锁定集关闭的秒数（WAIT_LOCK）。
+    survey_dwell_s: 2.0  # 已锁回访到位后驻留秒数，让几何来自拍照位（snapshot_id 不变）。
+    service_timeout_s: 5.0  # BeginScene 等服务等待上限。
+    action_timeout_s: 40.0  # Survey/Build/Execute 请求等待上限；受当前单果/扇区剩余预算截短，不保证任意接触链完成。单轨迹执行预算另由 arm 管理。
+    empty_survey_limit: 2  # 连续空扫次数上限，达到则结算批次。goal.target_ids 非空且已全部入账时 CYCLE_DONE 直接结算，不计入本上限。
+    selection_priority: 0  # 0=按 goal.target_ids 或自动第一颗。>0 时本批只抓拍照锁定集里 priority 等于该值的一颗，抓完即收批；调试页「按顺序」每轮改这个数。
+    persist_ledger: true  # 是否把 TargetOutcome 写入 runs/ 账本。
+    reconstruction_min_views: 1  # OBSERVE 成功后 Build 至少应有的机位数。1=当前拍照位即可派接触，不足才 observe_build_view_race。
+    skip_reconstruction: false  # true 时 DISPATCH 不发 Build/补视，使用锁定集几何（revision=unrefined:*），须 arm 允许未精化。节点基准关；整栈默认 mock=true、real=false，显式 launch 参数优先。
+    reconstruct_in_trajectory: true  # Build 已绑定即派臂侧精化等待周期，不再串行补视消耗已生成模型有效窗。FinalizeAndValidate 收齐同目标精化/许可后才规划；false 显式保留 fast/conservative 补视流程。
+    build_start_timeout_s: 5.0  # Build 目标绑定/资源初始化预算；不改变单果/批次时限，超时仍禁止观察运动。
+    observe_build_grace_s: 3.0  # OBSERVE 结束后等待重建机位数追上的宽限秒数。e2e25 轮（09-17）mock 下曾放 12.0（伪影所致 race）；mock 作废转真机后回调原值，真机证据另立。
+    begin_scene_service: /peach_scene_perception_node/begin_scene  # BeginScene 服务名。
+    survey_scene_action: /peach_arm/survey_scene  # SurveyScene 动作名。
+    execute_target_action: /peach_arm/execute_target  # ExecuteTarget 动作名。
+    build_target_model_action: /peach_target_reconstruction_node/build_target_model  # BuildTargetModel 动作名。
+    execute_pregrasp_only: true  # true 时接触段发 ExecuteTarget PREGRASP_ONLY（到预抓取验证后停住，不回 harvest_stow、不 SetIO；ACK 后再 Survey）；false 发 FULL。
+    selection_reach_min_m: 0.15  # 选果可达窗下限（base_link 半径，米）：过近进入自碰/退化区不选。goal.target_ids 显式指定时不受窗限。
+    selection_reach_max_m: 0.88  # 可达性回退窗上限（仅 CheckReachability 服务不可用时生效）：估计入口半径；FULL 时另卡套入终点半径。现场标定 09-01：预抓取成功 0.830–0.840 / MTC 0 解失败 ≥0.917。IK 预检在线时本参数不参与判定。
+    check_reachability_service: /peach_arm/check_reachability  # TCP IK 可达性预检服务（技能节点提供；executor SELECT 段批量查询）。
+    selection_depth_min_m: 0.3  # 选果深度距离窗下限（相机到目标，米）：与感知管线 min_depth 一致，过近深度不可用。
+    selection_depth_max_m: 1.6  # 选果深度距离窗上限（相机到目标，米）：深度质量随距离退化；采集门 min_mask_depth_ratio 仍逐帧把关，本窗做选果级预过滤。
+    require_managed_stack: false  # true 时须等 /peach/lifecycle/managed_nodes_activated 才接受 RunHarvest。
+    tool:
+      profile_id: adaptive_shear_v1  # ExecuteTarget goal.tool_profile_id 标签。基础值=自适应剪切手；整栈由 launch tool_profile 档案注入覆盖。

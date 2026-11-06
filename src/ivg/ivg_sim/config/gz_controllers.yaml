@@ -1,0 +1,40 @@
+# Original gripper2: effort commands (N), independent CAD fingers.
+controller_manager:
+  ros__parameters:
+    update_rate: 200
+    use_sim_time: true
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+    joint_trajectory_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+    gripper_effort_controller:
+      type: effort_controllers/JointGroupEffortController
+joint_trajectory_controller:
+  ros__parameters:
+    use_sim_time: true
+    joints:
+    - shoulder_joint
+    - upperArm_joint
+    - foreArm_joint
+    - wrist1_joint
+    - wrist2_joint
+    - wrist3_joint
+    command_interfaces:
+    - position
+    state_interfaces:
+    - position
+    - velocity
+    state_publish_rate: 50.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: false
+    constraints:
+      stopped_velocity_tolerance: 0.05
+      goal_time: 0.0
+gripper_effort_controller:
+  ros__parameters:
+    use_sim_time: true
+    joints:
+    - gripper2_pp_joint
+    - gripper2_pn_joint
+    - gripper2_np_joint
+    - gripper2_nn_joint

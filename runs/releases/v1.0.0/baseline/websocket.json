@@ -1,0 +1,22 @@
+{
+  "topic": "/peach_observability/web_state",
+  "frames": [
+    {
+      "received_ms": 1793990550152,
+      "hardware_mode": "mock",
+      "state_seq": 2,
+      "execution": false,
+      "grasp": false,
+      "tool": false
+    },
+    {
+      "received_ms": 1793990551152,
+      "hardware_mode": "mock",
+      "state_seq": 2,
+      "execution": false,
+      "grasp": false,
+      "tool": false
+    }
+  ],
+  "passed": true
+}

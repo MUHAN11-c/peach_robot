@@ -1,0 +1,89 @@
+<?xml version="1.0"?>
+<robot name="aubo_e5" xmlns:xacro="http://www.ros.org/wiki/xacro">
+<xacro:arg name="gripper" default="gripper2"/>
+<xacro:include filename="$(find ivg_description)/urdf/base.xacro"/>
+<xacro:include filename="$(find ivg_description)/urdf/tools.xacro"/>
+<xacro:include filename="$(find ivg_description)/urdf/gripper2_sim.xacro"/>
+<xacro:ivg_base include_workcell="false"/>
+<xacro:ivg_tools gripper="$(arg gripper)" tools_file="$(find ivg_description)/config/tools.yaml" articulated="true"/>
+<xacro:ivg_gripper2_fingers/>
+  <link name="pedestal_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="300.0"/>
+      <inertia ixx="14.2" ixy="0" ixz="0" iyy="14.2" iyz="0" izz="1.44"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.24 0.24 0.75"/></geometry>
+      <material name="pedestal_grey"><color rgba="0.45 0.45 0.45 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.24 0.24 0.75"/></geometry>
+    </collision>
+  </link>
+  <joint name="pedestal_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="pedestal_link"/>
+    <origin xyz="0 0 -0.375" rpy="0 0 0"/>
+  </joint>
+
+
+  <link name="camera_mount_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.05"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.03 0.03 0.02"/></geometry>
+      <material name="cam_dark"><color rgba="0.15 0.15 0.15 1"/></material>
+    </visual>
+  </link>
+  <joint name="camera_mount_joint" type="fixed">
+    <parent link="wrist3_Link"/>
+    <child link="camera_mount_link"/>
+    <origin xyz="0.044852 0.108401 0.001697"
+            rpy="-0.021191 0.000029 -0.021399"/>
+  </joint>
+
+  <!-- REP-103 光学系（x 右 y 下 z 前）：标定外参原值直挂 -->
+  <link name="camera_color_optical_frame"/>
+  <joint name="camera_optical_joint" type="fixed">
+    <parent link="wrist3_Link"/>
+    <child link="camera_color_optical_frame"/>
+    <origin xyz="0.044852 0.108401 0.001697"
+            rpy="-0.001461 0.009760 3.118940"/>
+  </joint>
+
+  <gazebo reference="camera_mount_link">
+    <sensor name="rgbd" type="rgbd_camera">
+      <topic>camera/depth</topic>
+      <update_rate>10.0</update_rate>
+      <gz_frame_id>camera_color_optical_frame</gz_frame_id>
+      <camera name="rgbd">
+        <horizontal_fov>1.203132</horizontal_fov>
+        <image><width>640</width><height>480</height></image>
+        <clip><near>0.05</near><far>2.5</far></clip>
+        <depth_camera><output>depths</output></depth_camera>
+      </camera>
+    </sensor>
+  </gazebo>
+
+
+<ros2_control name="IvgSimGazeboSystem" type="system"><hardware><plugin>gz_ros2_control/GazeboSimSystem</plugin></hardware>
+<joint name="shoulder_joint"><command_interface name="position"/><state_interface name="position"/><state_interface name="velocity"/></joint>
+<joint name="upperArm_joint"><command_interface name="position"/><state_interface name="position"/><state_interface name="velocity"/></joint>
+<joint name="foreArm_joint"><command_interface name="position"/><state_interface name="position"/><state_interface name="velocity"/></joint>
+<joint name="wrist1_joint"><command_interface name="position"/><state_interface name="position"/><state_interface name="velocity"/></joint>
+<joint name="wrist2_joint"><command_interface name="position"/><state_interface name="position"/><state_interface name="velocity"/></joint>
+<joint name="wrist3_joint"><command_interface name="position"/><state_interface name="position"/><state_interface name="velocity"/></joint>
+<joint name="gripper2_pp_joint"><command_interface name="effort"><param name="min">-20</param><param name="max">20</param></command_interface><state_interface name="position"><param name="initial_value">0.055</param></state_interface><state_interface name="velocity"/><state_interface name="effort"/></joint>
+<joint name="gripper2_pn_joint"><command_interface name="effort"><param name="min">-20</param><param name="max">20</param></command_interface><state_interface name="position"><param name="initial_value">0.055</param></state_interface><state_interface name="velocity"/><state_interface name="effort"/></joint>
+<joint name="gripper2_np_joint"><command_interface name="effort"><param name="min">-20</param><param name="max">20</param></command_interface><state_interface name="position"><param name="initial_value">0.055</param></state_interface><state_interface name="velocity"/><state_interface name="effort"/></joint>
+<joint name="gripper2_nn_joint"><command_interface name="effort"><param name="min">-20</param><param name="max">20</param></command_interface><state_interface name="position"><param name="initial_value">0.055</param></state_interface><state_interface name="velocity"/><state_interface name="effort"/></joint>
+</ros2_control>
+<gazebo><plugin filename="libgz_ros2_control-system.so" name="gz_ros2_control::GazeboSimROS2ControlPlugin"><parameters>$(find ivg_sim)/config/gz_controllers.yaml</parameters><hold_joints>true</hold_joints></plugin></gazebo>
+</robot>

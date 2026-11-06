@@ -1,0 +1,24 @@
+# MoveIt Simple Controller Manager（官方 moveit_controllers.yaml 布局）。
+# mock：标准 joint_trajectory_controller（ros2_control GenericSystem）。
+moveit_manage_controllers: false
+moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
+trajectory_execution.allowed_execution_duration_scaling: 5.0
+trajectory_execution.allowed_goal_duration_margin: 10.0
+trajectory_execution.allowed_start_tolerance: 0.15
+# TEM 关（与 real 同口径；UR Driver 主流）；A-P3-1 stop 风暴缓解。
+# 超时防线仍在：peach_arm execution_guard boundedExecute（moveit.execute_timeout_s 90s）。
+trajectory_execution.execution_duration_monitoring: false
+moveit_simple_controller_manager:
+  controller_names:
+    - joint_trajectory_controller
+  joint_trajectory_controller:
+    action_ns: follow_joint_trajectory
+    type: FollowJointTrajectory
+    default: true
+    joints:
+      - shoulder_joint
+      - upperArm_joint
+      - foreArm_joint
+      - wrist1_joint
+      - wrist2_joint
+      - wrist3_joint

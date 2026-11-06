@@ -1,0 +1,12 @@
+[
+  {
+    "bag": "/workspace/runs/clean_validation/verification_20261106T184137Z/readonly_mock/records/session_20261106_184224/bag",
+    "messages": 14868,
+    "passed": true
+  },
+  {
+    "bag": "/workspace/runs/clean_validation/verification_20261106T184137Z/frozen_grasp/records/session_20261106_184327/bag",
+    "messages": 9848,
+    "passed": true
+  }
+]

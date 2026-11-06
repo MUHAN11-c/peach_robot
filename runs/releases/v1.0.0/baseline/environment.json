@@ -1,0 +1,222 @@
+{
+  "python": "/workspace/aubo_py3.12/bin/python3",
+  "numpy": "1.26.4",
+  "torch": "2.13.0+cpu",
+  "torchvision": "0.28.0+cpu",
+  "ultralytics": "8.3.0",
+  "open3d": "0.19.0",
+  "cv_bridge": "/opt/ros/jazzy/lib/python3.12/site-packages/cv_bridge/__init__.py",
+  "usersite": false,
+  "requirements": [
+    {
+      "package": "numpy",
+      "version": "1.26.4",
+      "matches": true
+    },
+    {
+      "package": "setuptools",
+      "version": "78.1.0",
+      "matches": true
+    },
+    {
+      "package": "scipy",
+      "version": "1.11.4",
+      "matches": true
+    },
+    {
+      "package": "PyYAML",
+      "version": "6.0.1",
+      "matches": true
+    },
+    {
+      "package": "opencv-python",
+      "version": "4.11.0.86",
+      "matches": true
+    },
+    {
+      "package": "matplotlib",
+      "version": "3.11.1",
+      "matches": true
+    },
+    {
+      "package": "torch",
+      "version": "2.13.0+cpu",
+      "matches": true
+    },
+    {
+      "package": "torchvision",
+      "version": "0.28.0+cpu",
+      "matches": true
+    },
+    {
+      "package": "ultralytics",
+      "version": "8.3.0",
+      "matches": true
+    },
+    {
+      "package": "ultralytics-thop",
+      "version": "2.1.5",
+      "matches": true
+    },
+    {
+      "package": "tqdm",
+      "version": "4.67.1",
+      "matches": true
+    },
+    {
+      "package": "open3d",
+      "version": "0.19.0",
+      "matches": true
+    },
+    {
+      "package": "httpx",
+      "version": "0.27.2",
+      "matches": true
+    },
+    {
+      "package": "onnxruntime",
+      "version": "1.20.1",
+      "matches": true
+    },
+    {
+      "package": "pooch",
+      "version": "1.8.2",
+      "matches": true
+    },
+    {
+      "package": "pymatting",
+      "version": "1.1.15",
+      "matches": true
+    },
+    {
+      "package": "numba",
+      "version": "0.60.0",
+      "matches": true
+    },
+    {
+      "package": "llvmlite",
+      "version": "0.43.0",
+      "matches": true
+    },
+    {
+      "package": "trimesh",
+      "version": "4.5.3",
+      "matches": true
+    },
+    {
+      "package": "contourpy",
+      "version": "1.3.3",
+      "matches": true
+    },
+    {
+      "package": "cycler",
+      "version": "0.12.1",
+      "matches": true
+    },
+    {
+      "package": "fonttools",
+      "version": "4.63.0",
+      "matches": true
+    },
+    {
+      "package": "kiwisolver",
+      "version": "1.5.0",
+      "matches": true
+    },
+    {
+      "package": "packaging",
+      "version": "26.2",
+      "matches": true
+    },
+    {
+      "package": "pillow",
+      "version": "12.3.0",
+      "matches": true
+    },
+    {
+      "package": "pyparsing",
+      "version": "3.3.2",
+      "matches": true
+    },
+    {
+      "package": "python-dateutil",
+      "version": "2.9.0.post0",
+      "matches": true
+    },
+    {
+      "package": "six",
+      "version": "1.17.0",
+      "matches": true
+    },
+    {
+      "package": "fastapi",
+      "version": "0.101.0",
+      "matches": true
+    },
+    {
+      "package": "starlette",
+      "version": "0.27.0",
+      "matches": true
+    },
+    {
+      "package": "uvicorn",
+      "version": "0.27.1",
+      "matches": true
+    },
+    {
+      "package": "websockets",
+      "version": "12.0",
+      "matches": true
+    },
+    {
+      "package": "pytest",
+      "version": "7.4.4",
+      "matches": true
+    },
+    {
+      "package": "pytest-cov",
+      "version": "4.1.0",
+      "matches": true
+    },
+    {
+      "package": "semver",
+      "version": "3.0.2",
+      "matches": true
+    }
+  ],
+  "hostname": "peach-clean-room",
+  "namespaces": {
+    "user": "user:[4026533395]",
+    "mnt": "mnt:[4026533397]",
+    "pid": "pid:[4026533403]",
+    "ipc": "ipc:[4026533401]",
+    "net": "net:[4026533404]",
+    "uts": "uts:[4026533398]"
+  },
+  "network_interfaces": [
+    "lo"
+  ],
+  "uid_map": "0       1000          1",
+  "clean_room": true,
+  "planning_plugins": {
+    "pilz_industrial_motion_planner": "/opt/ros/jazzy/share/pilz_industrial_motion_planner",
+    "moveit_planners_stomp": "/opt/ros/jazzy/share/moveit_planners_stomp"
+  },
+  "cjk_font_families": [
+    "Noto Serif CJK JP",
+    "Noto Serif CJK KR",
+    "Noto Serif CJK HK",
+    "Noto Serif CJK SC",
+    "Noto Serif CJK TC",
+    "Noto Sans Mono CJK SC",
+    "Noto Sans Mono CJK TC",
+    "Noto Sans Mono CJK JP",
+    "Noto Sans Mono CJK HK",
+    "Noto Sans Mono CJK KR",
+    "Noto Sans CJK HK",
+    "Noto Sans CJK KR",
+    "Noto Sans CJK JP",
+    "Noto Sans CJK SC",
+    "Noto Sans CJK TC"
+  ]
+}

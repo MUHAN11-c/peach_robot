@@ -1,0 +1,1 @@
+import importlib.machinery, importlib.util, sys; _peach_mpl_spec = importlib.machinery.PathFinder.find_spec('mpl_toolkits', [sys._getframe(1).f_locals['sitedir']]); _peach_mpl_spec is not None and sys.modules.setdefault('mpl_toolkits', importlib.util.module_from_spec(_peach_mpl_spec))

@@ -1,0 +1,430 @@
+"""
+会话级 MCAP 过程记录器：整栈启停绑定，单流 bag 替代旧 9 路 jsonl 落盘.
+
+生命周期（决策 0019）：节点 on_configure 开 ``runs/session_<时间戳>/bag/``
+（rosbag2_py SequentialWriter + MCAP），节点关闭（destroy/shutdown）排空
+队列后收尾 bag 并返回目录供自动报告与体积回收。批次边界不再由记录器
+开合——events/state 消息自带 request_id，报告侧按其分组还原。
+
+rosbag2_py/rclpy.serialization 均在写线程内延迟导入：本模块可在无 ROS
+上下文下被导入与单测。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+import queue
+import threading
+import time
+
+from peach_common.recording_session import write_session_state
+
+from .bag_reader import type_name_of as message_type_name
+
+
+def session_folder(root, now: float | None = None) -> Path:
+    """会话目录命名：<root>/session_<yyyyMMdd_HHmmss>（bag 在其 bag/ 子目录）."""
+    stamp = time.strftime('%Y%m%d_%H%M%S', time.localtime(now or time.time()))
+    return Path(root) / f'session_{stamp}'
+
+
+# O1（2026-09-24 S3 真相机轮勘定：26G bag 构成=高频控制流族非相机）：
+# 关节/动态 TF/CM introspection/关节状态高频不减信息量地撑大 bag，按话题
+# 统一限 20Hz（首帧必录）——周期节拍与 TCP 轨迹离线重算足够分辨；
+# /tf_static 例外（启动期一批互不相同的静态变换，限速会丢 child frame）。
+# S4 轮（2026-09-24）实测补齐漏网：statistics/values 两族 20 万条、
+# dynamic_joint_states 与 JTC controller_state 各 10 万条、moveit_servo
+# 周期性重发 PlanningScene 1.7 万条——全部归入限速族。
+CONTROL_FLOW_TOPICS = {
+    '/joint_states', '/tf', '/diagnostics', '/dynamic_joint_states',
+}
+CONTROL_FLOW_SUBSTRINGS = (
+    'introspection', 'joint_status', 'io_states', 'statistics',
+    'controller_state',
+)
+CONTROL_FLOW_MIN_INTERVAL_S = 0.05
+# PlanningScene 族（moveit_servo 24Hz 重发 + monitored 3.8Hz）：有界世界
+# 状态非节拍流，20Hz 限速几乎不减量——单独 1Hz 档（首帧必录）。
+PLANNING_SCENE_TOPICS = {
+    '/moveit_servo/publish_planning_scene', '/monitored_planning_scene',
+}
+PLANNING_SCENE_MIN_INTERVAL_S = 1.0
+# 末端路径每次发布都带上全部历史点，20Hz 会把同一条轨迹反复写入。
+PATH_VIZ_SUBSTRINGS = (
+    '/peach/observability/tcp_path', '/peach/observability/markers',
+)
+PATH_VIZ_MIN_INTERVAL_S = 1.0
+# 感知结果的图像、掩膜、观测和点云只在「关键段」进袋：重建进入采集或
+# 就绪、或许可身份变化时打开，持续数秒、段内 1Hz。相机原流在 std 不订阅。
+# 实时预览不受影响。机械臂轨迹不在此列。
+PERCEPTION_MEDIA_SUBSTRINGS = (
+    'debug_image', 'masks', 'target_observations',
+    '_cloud', '/points', 'point_cloud',
+)
+PERCEPTION_SEGMENT_S = 3.0
+PERCEPTION_SEGMENT_MIN_INTERVAL_S = 1.0
+# 机械臂轨迹必须留下。队列满时图像类消息让路，不把关节/TF/轨迹挤掉。
+TRAJECTORY_TOPICS = {
+    '/joint_states', '/tf', '/tf_static', '/dynamic_joint_states',
+    '/peach/observability/tcp_path',
+}
+TRAJECTORY_SUBSTRINGS = (
+    'display_planned_path', 'follow_joint_trajectory',
+    'joint_trajectory_controller', 'execute_trajectory', 'controller_state',
+)
+
+
+def _is_arm_trajectory(topic: str) -> bool:
+    """关节、TF 与已下发轨迹。这些话题队列满时也要留下."""
+    return topic in TRAJECTORY_TOPICS or any(
+        part in topic for part in TRAJECTORY_SUBSTRINGS)
+
+
+def _is_perception_media(topic: str) -> bool:
+    """图像、掩膜和点云。机械臂轨迹即使话题名里带 cloud 也不算."""
+    if topic.startswith('/force/') or _is_arm_trajectory(topic):
+        return False
+    if topic.startswith('/camera/'):
+        return True
+    return any(part in topic for part in PERCEPTION_MEDIA_SUBSTRINGS)
+
+
+class Recorder:
+    """会话 bag 写入器：rosbag2 写操作由唯一守护线程执行."""
+
+    def __init__(self, root_dir='runs', enabled: bool = True,
+                 on_info=None, log_warning=lambda msg: None,
+                 now: float | None = None, queue_depth: int = 512,
+                 limit_perception_media: bool = True):
+        """
+        初始化并启动写线程；enabled 时入队开会话 bag（on_info 回调状态）.
+
+        queue_depth 给数据与控制项共用的队列上界。满队列时媒体丢自身，
+        其它消息淘汰最旧数据项；open/close 控制屏障不被淘汰。
+        info().drops 只统计队列丢弃，主动限速不计入。
+        """
+        self._root = Path(root_dir)
+        self._enabled = bool(enabled)
+        self._on_info = on_info or (lambda info: None)
+        self._log_warning = log_warning
+        self._lock = threading.RLock()
+        self._queue: queue.Queue = queue.Queue(
+            maxsize=max(1, int(queue_depth)))
+        self._drops = 0
+        self._written = 0
+        self._unwritten = 0
+        self._drop_warn_t = 0.0
+        self._throttle_ts: dict[str, float] = {}  # O1 控制流族限速时间戳
+        self._perception_until = 0.0  # 感知关键段截止（monotonic）
+        # std 只留关键段；all 档保留图像/点云全量，供短时复现。
+        self._limit_perception_media = bool(limit_perception_media)
+        self._stop = threading.Event()
+        self._closed = threading.Event()
+        self._session_dir: Path | None = None
+        self._bag_dir: Path | None = None
+        self._open_failed = False
+        self._accepting = self._enabled
+        self._closing = False
+        self._sealed = False
+        self._close_error = ''
+        self._write_errors = 0
+        self._thread = threading.Thread(
+            target=self._writer_loop, name='peach-web-recorder', daemon=True)
+        self._thread.start()
+        if self._enabled:
+            self._queue.put(('open', now))
+        self._on_info(self.info())
+
+    @property
+    def enabled(self) -> bool:
+        """录制总开关（on_activate 全量录制门控读用）."""
+        return self._enabled
+
+    @property
+    def session_dir(self) -> Path | None:
+        """当前会话目录（startup.json/selfcheck.json 等会话工件写于此）."""
+        with self._lock:
+            return self._session_dir
+
+    # ------------------------------------------------------------------
+    # observability 回调入口（只入队，绝不阻塞）
+    # ------------------------------------------------------------------
+    def info(self) -> dict:
+        """当前记录状态（前端状态栏/诊断用；directory=bag URI）."""
+        with self._lock:
+            return {
+                'enabled': self._enabled,
+                'directory': str(self._bag_dir) if self._bag_dir else None,
+                'session': str(self._session_dir) if self._session_dir else None,
+                'queue_size': self._queue.qsize(),
+                'queue_depth': self._queue.maxsize,
+                'drops': self._drops,
+                'written': self._written,
+                'dropped': self._drops + self._unwritten,
+                'open_failed': self._open_failed,
+                'sealed': self._sealed,
+                'close_error': self._close_error,
+                'write_errors': self._write_errors,
+            }
+
+    def mark_perception_segment(self) -> None:
+        """打开一小段感知结果进袋窗口。相机原流不因这次调用而开录."""
+        with self._lock:
+            self._perception_until = time.monotonic() + PERCEPTION_SEGMENT_S
+
+    def handle_raw(self, topic: str, message,
+                   timestamp_ns: int | None = None) -> None:
+        """原始消息入队写 bag；未启用或打开失败时静默丢弃（监控优先）."""
+        with self._lock:
+            if not self._enabled or not self._accepting or self._open_failed:
+                return
+            topic = str(topic)
+            if self._control_flow_throttled(topic):
+                return
+            self._enqueue((
+                'msg', topic, message,
+                int(timestamp_ns if timestamp_ns is not None else time.time_ns())))
+
+    def _perception_segment_open(self, now: float) -> bool:
+        with self._lock:
+            return now < self._perception_until
+
+    def _control_flow_throttled(self, topic: str) -> bool:
+        """限速族：控制流 20Hz / 感知关键段 1Hz / PlanningScene 1Hz；轨迹不丢."""
+        if topic == '/tf_static' or _is_arm_trajectory(topic):
+            if topic == '/tf_static':
+                return False
+            # 关节与 TF 仍按控制流 20Hz 留轨迹；规划/执行轨迹消息本身稀疏，不限。
+            if topic not in CONTROL_FLOW_TOPICS and not any(
+                    part in topic for part in CONTROL_FLOW_SUBSTRINGS):
+                return False
+        now = time.monotonic()
+        media = (
+            self._limit_perception_media and _is_perception_media(topic))
+        if media and not self._perception_segment_open(now):
+            return True
+        if topic in PLANNING_SCENE_TOPICS:
+            min_interval = PLANNING_SCENE_MIN_INTERVAL_S
+        elif any(part in topic for part in PATH_VIZ_SUBSTRINGS):
+            min_interval = PATH_VIZ_MIN_INTERVAL_S
+        elif media:
+            min_interval = PERCEPTION_SEGMENT_MIN_INTERVAL_S
+        elif topic in CONTROL_FLOW_TOPICS or any(
+            part in topic for part in CONTROL_FLOW_SUBSTRINGS
+        ):
+            min_interval = CONTROL_FLOW_MIN_INTERVAL_S
+        else:
+            return False
+        if now - self._throttle_ts.get(topic, 0.0) < min_interval:
+            return True
+        self._throttle_ts[topic] = now
+        return False
+
+    def _enqueue(self, item) -> None:
+        """有界入队。图像类满队列时丢掉自己；轨迹满队列时仍丢最旧挤进去."""
+        try:
+            self._queue.put_nowait(item)
+            return
+        except queue.Full:
+            pass
+        topic = item[1] if item and item[0] == 'msg' and len(item) > 1 else ''
+        if _is_perception_media(str(topic)):
+            self._note_drop()
+            return
+        try:
+            if not self._evict_message():
+                self._note_drop()
+                return
+            self._queue.put_nowait(item)
+        except (queue.Empty, queue.Full):
+            pass
+        self._note_drop()
+
+    def _evict_message(self) -> bool:
+        """原子移除最旧数据项；open/close 控制屏障始终不可丢."""
+        with self._queue.mutex:
+            for index, job in enumerate(self._queue.queue):
+                if job[0] != 'msg':
+                    continue
+                del self._queue.queue[index]
+                self._queue.unfinished_tasks -= 1
+                if not self._queue.unfinished_tasks:
+                    self._queue.all_tasks_done.notify_all()
+                self._queue.not_full.notify()
+                return True
+        return False
+
+    def _note_drop(self) -> None:
+        """丢帧计数 + 10s 节流告警（持续掉队=盘速不足，值得看见）."""
+        self._drops += 1
+        now = time.monotonic()
+        if now - self._drop_warn_t >= 10.0:
+            self._drop_warn_t = now
+            self._log_warning(
+                f'bag 写队列掉队丢帧：累计 {self._drops}'
+                '（盘速不足，丢最旧保最新）')
+
+    def close(self, timeout_s: float = 8.0) -> Path | None:
+        """排空队列并收尾 bag；有界等待，避免 SIGINT 时 queue.join 永久挂死."""
+        budget = max(0.1, float(timeout_s))
+        with self._lock:
+            self._accepting = False
+            first_close = not self._closing
+            self._closing = True
+            session = self._session_dir
+        if first_close and session is not None:
+            self._session_state('closing')
+        if self._enabled:
+            if first_close:
+                try:
+                    # No new data can arrive: wait for space without discarding
+                    # accepted messages, and never evict an open/close barrier.
+                    self._queue.put(('close',), timeout=budget)
+                except queue.Full:
+                    self._close_error = 'close control queue timed out'
+            if not self._closed.wait(timeout=budget):
+                self._close_error = self._close_error or 'writer close timed out'
+                self._log_warning(
+                    f'bag 收尾超时 {budget:.1f}s；未确认封口，跳过自动报告')
+        self._stop.set()
+        self._thread.join(timeout=min(2.0, budget))
+        with self._lock:
+            state = 'sealed' if self._sealed else (
+                'error' if self._closed.is_set() else 'closing')
+            self._session_state(state)
+            return self._bag_dir if self._sealed and not self._thread.is_alive() else None
+
+    def _session_state(self, state: str, **fields) -> None:
+        """会话声明与bag同属一个写者；声明失败必须可见."""
+        with self._lock:
+            if self._session_dir is None:
+                return
+            try:
+                write_session_state(
+                    self._session_dir, state, written=self._written,
+                    dropped=self._drops + self._unwritten, drops=self._drops,
+                    write_errors=self._write_errors, close_error=self._close_error,
+                    open_failed=self._open_failed, sealed=self._sealed, **fields)
+            except OSError as error:
+                self._log_warning(f'会话状态写入失败: {error}')
+
+    # ------------------------------------------------------------------
+    # 写线程：唯一调用 rosbag2 writer 的地方；session.json 另受状态锁保护。
+    # ------------------------------------------------------------------
+    def _writer_loop(self) -> None:
+        """顺序处理 open/msg/close；写盘异常只降级告警，线程不死."""
+        writer = None
+        created: set[str] = set()
+        while True:
+            try:
+                job = self._queue.get(timeout=0.2)
+            except queue.Empty:
+                if self._stop.is_set():
+                    break
+                continue
+            try:
+                kind = job[0]
+                if kind == 'open':
+                    writer = self._open_bag(writer)
+                elif kind == 'msg':
+                    if writer is None:
+                        with self._lock:
+                            self._unwritten += 1
+                    else:
+                        writer = self._write_message(writer, created, job)
+                elif kind == 'close':
+                    sealed = self._close_writer(writer)
+                    writer = None
+                    with self._lock:
+                        self._sealed = sealed
+                        self._session_state('sealed' if sealed else 'error')
+                        self._closed.set()
+                    break
+            except Exception as error:  # 单任务失败只告警，线程不死
+                with self._lock:
+                    self._write_errors += 1
+                    if job[0] == 'msg':
+                        self._unwritten += 1
+                self._log_warning(f'bag 记录任务失败（跳过）: {error}')
+            finally:
+                self._queue.task_done()
+        if not self._closed.is_set():
+            # close 任务未达（异常路径）的兜底收尾。
+            sealed = self._close_writer(writer) if writer is not None else False
+            with self._lock:
+                self._sealed = sealed
+                self._session_state('sealed' if sealed else 'error')
+                self._closed.set()
+
+    def _open_bag(self, writer):
+        """
+        开会话 bag；重复调用或已失败则跳过；成功后回调 info.
+
+        bag 目录本身由 rosbag2 创建（writer.open 拒绝已存在的目录），这里
+        只保证会话层目录存在；同秒重启等命名冲突时追加序号后移。
+        """
+        if writer is not None or self._open_failed:
+            return writer
+        from rosbag2_py import ConverterOptions, SequentialWriter, StorageOptions
+
+        session = session_folder(self._root)
+        try:
+            self._root.mkdir(parents=True, exist_ok=True)
+            while True:
+                try:
+                    session.mkdir()
+                    break
+                except FileExistsError:
+                    session = session.with_name(f'{session.name}_x')
+            with self._lock:
+                self._session_dir = session
+            bag_dir = session / 'bag'
+            writer = SequentialWriter()
+            writer.open(
+                StorageOptions(uri=str(bag_dir), storage_id='mcap'),
+                ConverterOptions(
+                    input_serialization_format='cdr',
+                    output_serialization_format='cdr'))
+        except Exception as error:
+            self._open_failed = True
+            self._session_state('error')
+            self._log_warning(f'会话 bag 打开失败，本会话不录制: {error}')
+            return None
+        with self._lock:
+            self._session_dir = session
+            self._bag_dir = bag_dir
+        self._session_state(
+            'closing' if self._closing else 'active',
+            opened_at_ns=time.time_ns())
+        self._on_info(self.info())
+        return writer
+
+    def _write_message(self, writer, created: set, job):
+        """单条消息写 bag；话题首见时建 TopicMetadata（类型取自消息类）."""
+        if writer is None:
+            return writer
+        from rosbag2_py import TopicMetadata
+        from rclpy.serialization import serialize_message
+
+        _, topic, message, stamp_ns = job
+        if topic not in created:
+            writer.create_topic(TopicMetadata(
+                id=0, name=topic, type=message_type_name(message),
+                serialization_format='cdr'))
+            created.add(topic)
+        writer.write(topic, serialize_message(message), stamp_ns)
+        with self._lock:
+            self._written += 1
+        return writer
+
+    def _close_writer(self, writer) -> bool:
+        """收尾 bag（metadata.yaml 落盘）；重复关闭无害."""
+        if writer is None:
+            return False
+        try:
+            writer.close()
+            return True
+        except Exception as error:  # 收尾失败不掩饰：报告侧会走 reindex 兜底
+            self._close_error = str(error)
+            self._log_warning(f'bag 收尾异常（报告侧将尝试 reindex）: {error}')
+            return False

@@ -1,0 +1,241 @@
+{
+  "schema": "peach-clean-room-v1",
+  "id": "9f5a270f037441f6bc8fdad7198b0766",
+  "started_utc": "20261106T180105Z",
+  "source": "/home/wjz/peach_robot/aubo_e5_jazzy_ws",
+  "directory": "/home/wjz/peach_robot/clean_room_20261107",
+  "base_url": "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-amd64.tar.gz",
+  "base_sha256": "e77b6f10c2590cef872b33ee9f635a0e3fd1f57fb074c0e52b5c7f56147a0c86",
+  "host_namespaces": {
+    "user": "user:[4026531837]",
+    "mnt": "mnt:[4026531832]",
+    "pid": "pid:[4026531836]",
+    "ipc": "ipc:[4026531839]",
+    "net": "net:[4026531833]",
+    "uts": "uts:[4026531838]"
+  },
+  "stages": {
+    "extract_base": {
+      "exit_code": 0,
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/extract_base.log"
+    },
+    "empty_baseline": {
+      "exit_code": 0,
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/empty_baseline.log"
+    },
+    "bootstrap_tools": {
+      "started_utc": "2026-11-06T18:41:37.353022+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/bootstrap_tools_20261106T184137Z_ec4960.log",
+      "finished_utc": "2026-11-06T18:41:38.168018+00:00"
+    },
+    "system": {
+      "started_utc": "2026-11-06T18:41:38.168554+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/system_20261106T184138Z_c44797.log",
+      "finished_utc": "2026-11-06T18:42:01.324870+00:00"
+    },
+    "build": {
+      "started_utc": "2026-11-06T18:42:01.325351+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/build_20261106T184201Z_21d3dc.log",
+      "finished_utc": "2026-11-06T18:42:20.969842+00:00"
+    },
+    "browser_download": {
+      "started_utc": "2026-11-06T18:42:20.970297+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/browser_download_20261106T184220Z_aaaad7.log",
+      "finished_utc": "2026-11-06T18:42:21.210144+00:00"
+    },
+    "verify": {
+      "started_utc": "2026-11-06T18:42:21.210644+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/verify_20261106T184221Z_5d4596.log",
+      "finished_utc": "2026-11-06T18:44:05.209407+00:00"
+    }
+  },
+  "prepared": true,
+  "initial_environment": {
+    "ros": false,
+    "node": false,
+    "colcon": false,
+    "venv": false,
+    "build_install": false,
+    "host_home_mounted": false,
+    "host_package_caches_mounted": false,
+    "source_only_fixture_copied": true,
+    "namespace_root_mapping": "container uid 0 maps to the invoking host user"
+  },
+  "requested_stage_passed": true,
+  "apt_mirrors": {
+    "ubuntu": "https://mirrors.ustc.edu.cn/ubuntu",
+    "ros": "https://mirrors.ustc.edu.cn/ros2/ubuntu"
+  },
+  "certificate_bootstrap": "Installed ca-certificates via GPG-verified Ubuntu apt before switching to HTTPS",
+  "stage_history": [
+    {
+      "name": "bootstrap_tools",
+      "started_utc": "2026-11-06T18:12:22.369331+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/bootstrap_tools_20261106T181222Z_91397b.log",
+      "finished_utc": "2026-11-06T18:12:25.736622+00:00"
+    },
+    {
+      "name": "system",
+      "started_utc": "2026-11-06T18:12:25.737037+00:00",
+      "exit_code": 1,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/system_20261106T181225Z_56f1d8.log",
+      "finished_utc": "2026-11-06T18:12:37.183995+00:00"
+    },
+    {
+      "name": "bootstrap_tools",
+      "started_utc": "2026-11-06T18:13:30.072912+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/bootstrap_tools_20261106T181330Z_9e248d.log",
+      "finished_utc": "2026-11-06T18:13:30.949317+00:00"
+    },
+    {
+      "name": "system",
+      "started_utc": "2026-11-06T18:13:30.949589+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/system_20261106T181330Z_f71293.log",
+      "finished_utc": "2026-11-06T18:20:32.905657+00:00"
+    },
+    {
+      "name": "bootstrap_tools",
+      "started_utc": "2026-11-06T18:22:40.415321+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/bootstrap_tools_20261106T182240Z_a91590.log",
+      "finished_utc": "2026-11-06T18:22:41.312363+00:00"
+    },
+    {
+      "name": "system",
+      "started_utc": "2026-11-06T18:22:41.312763+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/system_20261106T182241Z_c4aa55.log",
+      "finished_utc": "2026-11-06T18:22:53.556101+00:00"
+    },
+    {
+      "name": "build",
+      "started_utc": "2026-11-06T18:22:53.556512+00:00",
+      "exit_code": 1,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/build_20261106T182253Z_d7d1f7.log",
+      "finished_utc": "2026-11-06T18:26:15.535114+00:00"
+    },
+    {
+      "name": "build",
+      "started_utc": "2026-11-06T18:28:19.547503+00:00",
+      "exit_code": 1,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/build_20261106T182819Z_b910ed.log",
+      "finished_utc": "2026-11-06T18:29:32.936687+00:00"
+    },
+    {
+      "name": "bootstrap_tools",
+      "started_utc": "2026-11-06T18:32:09.960183+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/bootstrap_tools_20261106T183209Z_3dd412.log",
+      "finished_utc": "2026-11-06T18:32:10.921923+00:00"
+    },
+    {
+      "name": "system",
+      "started_utc": "2026-11-06T18:32:10.922360+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/system_20261106T183210Z_b5b14f.log",
+      "finished_utc": "2026-11-06T18:33:48.025194+00:00"
+    },
+    {
+      "name": "build",
+      "started_utc": "2026-11-06T18:33:48.025653+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/build_20261106T183348Z_214219.log",
+      "finished_utc": "2026-11-06T18:35:50.154674+00:00"
+    },
+    {
+      "name": "browser_download",
+      "started_utc": "2026-11-06T18:35:50.155130+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/browser_download_20261106T183550Z_6a1d12.log",
+      "finished_utc": "2026-11-06T18:36:10.653619+00:00"
+    },
+    {
+      "name": "verify",
+      "started_utc": "2026-11-06T18:36:10.654080+00:00",
+      "exit_code": 1,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/verify_20261106T183610Z_a2e25a.log",
+      "finished_utc": "2026-11-06T18:39:17.548756+00:00"
+    },
+    {
+      "name": "bootstrap_tools",
+      "started_utc": "2026-11-06T18:41:37.353022+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/bootstrap_tools_20261106T184137Z_ec4960.log",
+      "finished_utc": "2026-11-06T18:41:38.168018+00:00"
+    },
+    {
+      "name": "system",
+      "started_utc": "2026-11-06T18:41:38.168554+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/system_20261106T184138Z_c44797.log",
+      "finished_utc": "2026-11-06T18:42:01.324870+00:00"
+    },
+    {
+      "name": "build",
+      "started_utc": "2026-11-06T18:42:01.325351+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/build_20261106T184201Z_21d3dc.log",
+      "finished_utc": "2026-11-06T18:42:20.969842+00:00"
+    },
+    {
+      "name": "browser_download",
+      "started_utc": "2026-11-06T18:42:20.970297+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/browser_download_20261106T184220Z_aaaad7.log",
+      "finished_utc": "2026-11-06T18:42:21.210144+00:00"
+    },
+    {
+      "name": "verify",
+      "started_utc": "2026-11-06T18:42:21.210644+00:00",
+      "exit_code": 0,
+      "state": "finished",
+      "log": "/home/wjz/peach_robot/clean_room_20261107/logs/verify_20261106T184221Z_5d4596.log",
+      "finished_utc": "2026-11-06T18:44:05.209407+00:00"
+    }
+  ],
+  "completed_utc": "2026-11-06T18:44:05.209938+00:00",
+  "full_validation_passed": true,
+  "installer_sha256": {
+    "validate_clean.py": "e7272101a0349932179f3a5b1740c441fc32db8dd76bb3f2b6d80f3331109b56",
+    "probe_websocket.js": "7951c72e425ac9b82175f4356db1d424e93de58e07282c1dc7643f2e057dd367",
+    "peach-matplotlib-nspkg.pth": "8ea8c3b105cfc299f6a41d33d4a6682959adcc318e614badcf846212279ba339",
+    "deploy.sh": "c12475d891ba6e214dea7417601975204f8aeace1a8cba9f50c8240061de3bbf",
+    "bootstrap_ubuntu.sh": "c2eca5a67cf074d6ba159362aa4ce801a66d6d8e23d944fa04ea95dc1ed8f894",
+    "verify_mock.py": "7912a9a60e73323c21f2e5f521e915a43874e306e8f36e2a141710c38d1534e1",
+    "env.bash": "ce6dc81e3ed24e4d694f814b28955c14bb4b5ed78b8356aa89ecb5dd5d574eb5",
+    "README.md": "830d813157c0e1a17871d8377f7eda04aa499ec8a1fdc36d0298341180dbd16e",
+    "verify.sh": "539975d221648718f7cf73933ebb26a3dfa82849db317d1f4e132111615eecdf"
+  },
+  "deployment_path": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/deployment_20261106T184137Z",
+  "verification_path": "/home/wjz/peach_robot/clean_room_20261107/workspace/runs/clean_validation/verification_20261106T184137Z"
+}

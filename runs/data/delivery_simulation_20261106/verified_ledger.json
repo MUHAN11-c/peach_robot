@@ -1,0 +1,62 @@
+{
+  "claimed": [
+    "target_1",
+    "target_2"
+  ],
+  "outcomes": [
+    {
+      "target_id": "target_2",
+      "outcome": 1,
+      "reason": "build_failed: bag_axis_envelope_ill_conditioned; attempts=3; 局部重建完成：1 帧，3717 点（少于推荐 5 帧）；跳过 1 次（missing_mask=1）；重叠指标需 ≥2 帧，本批次不可用；TSDF 1135 点 / mesh 1991 顶点（累计积分 0.00s）；refit 失败（bag_axis_envelope_ill_conditioned）；refit 未产出可用几何",
+      "quality_score": 0.0,
+      "elapsed_s": 1.606,
+      "failure_code": "build_failed",
+      "failure_code_n": 2,
+      "completion_level": 0,
+      "stage_names": [
+        "finalize"
+      ],
+      "stage_durations": [
+        1.474
+      ],
+      "start_unix_ns": 1793960177405499319,
+      "end_unix_ns": 1793960179016457416,
+      "start_ros_ns": 1793960177405493550,
+      "end_ros_ns": 1793960179016445671,
+      "time_basis": "source_clock",
+      "clock_domain": "ros+system",
+      "cycle_id": "delivery_frozen_verified_20261106:target_2",
+      "scene_epoch": 1
+    },
+    {
+      "target_id": "target_1",
+      "outcome": 0,
+      "reason": "周期完成；tool.enabled=false 或未宣称采摘成功",
+      "quality_score": 0.0,
+      "elapsed_s": 18.618,
+      "completion_level": 6,
+      "stage_names": [
+        "finalize",
+        "approach_insert",
+        "reconfirm",
+        "tool",
+        "retreat"
+      ],
+      "stage_durations": [
+        0.51,
+        9.124,
+        0.2,
+        0.0,
+        8.677
+      ],
+      "start_unix_ns": 1793960181399057782,
+      "end_unix_ns": 1793960200024957525,
+      "start_ros_ns": 1793960181399052084,
+      "end_ros_ns": 1793960200024945833,
+      "time_basis": "source_clock",
+      "clock_domain": "ros+system",
+      "cycle_id": "delivery_frozen_verified_20261106:target_1",
+      "scene_epoch": 1
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ivg_interfaces</name>
+  <version>1.0.0</version>
+  <description>
+    IVG IDL：旁路模板估姿（EstimatePose* / ListTemplates / StandardizeTemplate / UpdateParams）
+    + 演示栈（拉花 RunLatteWorkflow / 快换 RunGripperSwap·ChangeTool·GetCurrentTool /
+    抓取 ExecuteGraspPose / 监控 NodeStatus·SystemLog·ToolChangerStatus，源自 aubo_boot 移植）。
+    不进 peach 清单；机械臂 FK/IK/IO/急停仍走 aubo_msgs，不在此重复。
+  </description>
+  <maintainer email="wangxiaoyun@iscas.ac.cn">muhan11</maintainer>
+  <license>Apache License 2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

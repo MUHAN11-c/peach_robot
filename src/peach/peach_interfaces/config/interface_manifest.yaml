@@ -1,0 +1,396 @@
+# peach 跨包契约清单（单一真源，对齐 Autoware component_interface_specs 思路）
+# 名称 / 类型 / QoS / 生产与消费方。脚本 scripts/check_interface_manifest.py 双向核对：
+#   正向 manifest→源码字面量；反向源码绝对 /peach 话题字面量→manifest（可视化豁免表内除外）。
+# 现行核心栈：peach_interfaces / peach_common / peach_scene_perception / peach_target_reconstruction / peach_supervisor / peach_scene_obstacles / peach_arm /
+# peach_bringup / peach_observability / peach_vegetation / peach_system_tests /
+# peach_stereo（相机前端；peach_sim 场景包另有 /peach_sim/joint_states 预留登记）。
+# peach2 已归档到 _archive/parked_2026-10-12/peach2，不参与现行构建与清单检查。
+version: 2
+interfaces:
+  - name: /peach_observability/web_state
+    kind: topic
+    type: std_msgs/msg/String
+    qos: {reliability: reliable, durability: volatile, depth: 1}
+    producers: [peach_observability]
+    consumers: []  # rosbridge / external Web client
+  - name: /peach_observability/web_force
+    kind: topic
+    type: std_msgs/msg/String
+    qos: {reliability: reliable, durability: volatile, depth: 1}
+    producers: [peach_observability]
+    consumers: []
+  - name: /peach_observability/web_trajectory
+    kind: topic
+    type: std_msgs/msg/String
+    qos: {reliability: reliable, durability: volatile, depth: 1}
+    producers: [peach_observability]
+    consumers: []
+  - name: /force/sample
+    kind: topic
+    type: peach_interfaces/msg/ForceSample
+    qos: {reliability: reliable, durability: volatile, depth: 100}
+    producers: [serial_force]
+    consumers: [peach_observability]
+  - name: /peach_supervisor/state
+    kind: topic
+    type: peach_interfaces/msg/HarvestState
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_supervisor]
+    consumers: [peach_scene_perception, peach_target_reconstruction, peach_observability]
+  - name: /peach_supervisor/events
+    kind: topic
+    type: peach_interfaces/msg/CanonicalEvent
+    qos: {reliability: reliable, durability: transient_local, depth: 50}
+    producers: [peach_supervisor]
+    consumers: [peach_observability]
+  - name: /peach_supervisor/scene_snapshot
+    kind: topic
+    type: peach_interfaces/msg/SceneSnapshot
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_supervisor]
+    consumers: [peach_observability]
+  - name: /peach_supervisor/run_harvest
+    kind: action
+    type: peach_interfaces/action/RunHarvest
+    producers: [peach_supervisor]
+    consumers: [peach_observability]
+  - name: /peach_supervisor/set_enables
+    kind: service
+    type: peach_interfaces/srv/SetEnables
+    producers: [peach_supervisor]
+    consumers: [peach_observability]   # 8090 set_enables_service调试桥；服务端广播使能
+  - name: /peach_supervisor/set_batch_policy
+    kind: service
+    type: peach_interfaces/srv/SetBatchPolicy
+    producers: [peach_supervisor]
+    consumers: []   # 人工（8090 操作台转发未接；ros2 service call 可用）
+  - name: /peach_supervisor/fire_step
+    kind: service
+    type: peach_interfaces/srv/FireStep
+    producers: [peach_supervisor]
+    consumers: []   # 人工（8090 操作台转发未接）；运动类过臂侧命令门
+  - name: /peach_supervisor/control
+    kind: service
+    type: peach_interfaces/srv/ControlTask
+    producers: [peach_supervisor]
+    consumers: [peach_observability]
+  - name: /peach/perception/target_observations
+    kind: topic
+    type: peach_interfaces/msg/PeachTargetObservationArray
+    qos: {reliability: reliable, durability: volatile, depth: 10}
+    producers: [peach_scene_perception]
+    consumers: [peach_supervisor, peach_target_reconstruction, peach_arm, peach_observability]
+  - name: /peach/perception/initial_pose
+    kind: topic
+    type: peach_interfaces/msg/BagGraspCandidateArray
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_scene_perception]
+    consumers: [peach_target_reconstruction]
+  - name: /peach/perception/diagnostics
+    kind: topic
+    type: peach_interfaces/msg/BagFittingArray
+    producers: [peach_scene_perception]
+    consumers: [peach_target_reconstruction]
+  - name: /peach/perception/harvest_state
+    kind: topic
+    type: std_msgs/msg/String
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_scene_perception]
+    consumers: [peach_observability]
+  - name: /peach/perception/debug_image
+    kind: topic
+    type: sensor_msgs/msg/Image
+    qos: {reliability: reliable, durability: volatile, depth: 1}
+    producers: [peach_scene_perception]
+    consumers: [peach_observability]
+  - name: /peach/reconstruction/diagnostics
+    kind: topic
+    type: peach_interfaces/msg/ReconstructionStatus
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_target_reconstruction]
+    consumers: [peach_arm, peach_observability]
+  - name: /peach/reconstruction/diagnostics_debug
+    kind: topic
+    type: std_msgs/msg/String
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_target_reconstruction]
+    consumers: [peach_observability]
+  - name: /peach/reconstruction/status
+    kind: topic
+    type: std_msgs/msg/String
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_target_reconstruction]
+    consumers: [peach_observability]
+  - name: /peach/reconstruction/grasp_decision
+    kind: topic
+    type: peach_interfaces/msg/GraspDecision
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_target_reconstruction]
+    consumers: [peach_arm, peach_supervisor, peach_observability]  # supervisor=闩锁许可令牌缓存（3c-2a，非选果输入）
+  - name: /peach/reconstruction/pregrasp_verification
+    kind: topic
+    type: peach_interfaces/msg/PregraspVerification
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_target_reconstruction]
+    consumers: []
+  - name: /peach/reconstruction/refined_pose
+    kind: topic
+    type: peach_interfaces/msg/BagGraspCandidateArray
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_target_reconstruction]
+    consumers: [peach_arm, peach_scene_obstacles, peach_observability]
+  - name: /peach/scene/obstacles_refresh
+    kind: topic
+    type: std_msgs/msg/Empty
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_supervisor]
+    consumers: [peach_scene_obstacles]
+    # Survey 快照式建图触发（2026-09-29 避障只为保护相机）：Survey 成功=
+    # 臂在拍照位刚拍完全场景，此刻点云帧即障碍快照源；新批次自动重建。
+    # 障碍对象 id=peach_scene_obstacles（经 /apply_planning_scene 写
+    # PlanningScene world；peach_arm 只写 ACM diff——双写者分域）。
+  - name: /peach/reconstruction/refined_axis
+    kind: topic
+    type: geometry_msgs/msg/Vector3Stamped
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_target_reconstruction]
+    consumers: [peach_observability]
+  - name: /peach/reconstruction/refined_diagnostics
+    kind: topic
+    type: peach_interfaces/msg/BagFittingArray
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_target_reconstruction]
+    consumers: [peach_arm, peach_observability]
+  - name: /peach/reconstruction/tsdf_cloud
+    kind: topic
+    type: sensor_msgs/msg/PointCloud2
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_target_reconstruction]
+    consumers: [peach_observability]
+  - name: /peach/reconstruction/preview_cloud
+    kind: topic
+    type: sensor_msgs/msg/PointCloud2
+    qos: {reliability: best_effort, durability: transient_local, depth: 1}
+    producers: [peach_target_reconstruction]
+    consumers: []  # RViz only; <=50000 points, never an algorithm input
+  - name: /peach/reconstruction/markers
+    kind: topic
+    type: visualization_msgs/msg/MarkerArray
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_target_reconstruction]
+    consumers: []
+  - name: /peach/reconstruction/shape_hypothesis
+    kind: topic
+    type: peach_interfaces/msg/ShapeHypothesis
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_target_reconstruction]
+    consumers: []
+  - name: /peach/manipulation/grasp_hypothesis
+    kind: topic
+    type: peach_interfaces/msg/GraspHypothesis
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_arm]
+    consumers: [peach_observability]
+  - name: /peach_scene_perception_node/begin_scene
+    kind: service
+    type: peach_interfaces/srv/BeginScene
+    producers: [peach_scene_perception]
+    consumers: [peach_supervisor, peach_observability]
+  - name: /peach_arm/survey_scene
+    kind: action
+    type: peach_interfaces/action/SurveyScene
+    producers: [peach_arm]
+    consumers: [peach_supervisor]
+  - name: /peach_arm/execute_target
+    kind: action
+    type: peach_interfaces/action/ExecuteTarget
+    producers: [peach_arm]
+    consumers: [peach_supervisor]
+  - name: /peach_arm/status
+    kind: topic
+    type: std_msgs/msg/String
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_arm]
+    consumers: [peach_observability]
+  - name: /peach_arm/acknowledge_recovery
+    kind: service
+    type: std_srvs/srv/Trigger
+    producers: [peach_arm]
+    consumers: [peach_supervisor]
+  - name: /peach_arm/check_reachability
+    kind: service
+    type: peach_interfaces/srv/CheckReachability
+    producers: [peach_arm]
+    consumers: [peach_supervisor, peach_observability]
+  - name: /peach_arm/move_to
+    kind: action
+    type: peach_interfaces/action/MoveTo
+    producers: [peach_arm]
+    consumers: [peach_supervisor]   # fast补视 + FireStep PHOTO；FULL返程在周期内沿成功接近段倒放回拍照位
+  - name: /peach_arm/tool_state
+    kind: topic
+    type: peach_interfaces/msg/ToolState
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_arm]   # 三轴工具状态；当前有效DI新沿/开刀释放时发布，无周期心跳
+    consumers: []   # 无显式订户（会话 bag catch-all 落证据；回写禁止）
+  - name: /peach/batch/enables
+    kind: topic
+    type: peach_interfaces/msg/Enables
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_supervisor]   # SetEnables 服务后广播；Active 且 override 非空时 1Hz 心跳重发
+    consumers: [peach_arm]   # 臂侧收到过即覆盖本地参数（意图源=supervisor，强制点=臂侧命令门）
+  - name: /peach_lifecycle_manager/is_active
+    kind: service
+    type: std_srvs/srv/Trigger
+    producers: []   # nav2_lifecycle_manager（外部节点，阶段 5 替自研件）
+    consumers: [peach_bringup]
+  - name: /peach/lifecycle/managed_nodes_activated
+    kind: topic
+    type: std_msgs/msg/Bool
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_lifecycle_flag_bridge]  # 阶段5：nav2_lm is_active→闩锁桥
+    consumers: [peach_supervisor]
+  - name: /peach_lifecycle_manager/manage_nodes
+    kind: service
+    type: nav2_msgs/srv/ManageLifecycleNodes
+    producers: []   # nav2_lifecycle_manager（外部节点）
+    consumers: [peach_observability]
+  - name: /peach_target_reconstruction_node/build_target_model
+    kind: action
+    type: peach_interfaces/action/BuildTargetModel
+    producers: [peach_target_reconstruction]
+    consumers: [peach_supervisor]
+  - name: /peach/observability/tcp_path
+    kind: topic
+    type: nav_msgs/msg/Path
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_observability]
+    consumers: []
+  - name: /peach/observability/markers
+    kind: topic
+    type: visualization_msgs/msg/MarkerArray
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_observability]
+    consumers: []
+  - name: /peach/observability/job
+    kind: topic
+    type: std_msgs/msg/String
+    qos: {reliability: reliable, durability: volatile, depth: 10}
+    producers: [peach_observability]
+    consumers: []
+  - name: /peach/observability/metrics
+    kind: topic
+    type: std_msgs/msg/String
+    qos: {reliability: reliable, durability: volatile, depth: 10}
+    producers: [peach_observability]
+    consumers: []
+  - name: /peach/observability/selfcheck_passed
+    kind: topic
+    type: std_msgs/msg/Bool
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: [peach_observability]
+    consumers: [peach_bringup]
+  - name: /peach_arm/go_to_photo_pose
+    kind: service
+    type: std_srvs/srv/Trigger
+    producers: [peach_arm]
+    consumers: []
+  - name: /peach_arm/preview_approach_insert
+    kind: service
+    type: std_srvs/srv/Trigger
+    producers: [peach_arm]
+    consumers: []
+  - name: /peach_arm/preview_full_contact
+    kind: service
+    type: std_srvs/srv/Trigger
+    producers: [peach_arm]
+    consumers: []
+  - name: /peach_arm/set_execution_armed
+    kind: service
+    type: std_srvs/srv/SetBool
+    producers: [peach_arm]
+    consumers: []
+  - name: /peach_arm/cancel_cycle
+    kind: service
+    type: std_srvs/srv/Trigger
+    producers: [peach_arm]
+    consumers: []
+  - name: /peach_target_reconstruction_node/reset_reconstruction
+    kind: service
+    type: std_srvs/srv/Trigger
+    producers: [peach_target_reconstruction]
+    consumers: []
+  - name: /peach_target_reconstruction_node/finalize_reconstruction
+    kind: service
+    type: std_srvs/srv/Trigger
+    producers: [peach_target_reconstruction]
+    consumers: []
+  - name: /peach_target_reconstruction_node/save_session
+    kind: service
+    type: std_srvs/srv/Trigger
+    producers: [peach_target_reconstruction]
+    consumers: []
+  - name: /peach_target_reconstruction_node/query_reconstruction_state
+    kind: service
+    type: std_srvs/srv/Trigger
+    producers: [peach_target_reconstruction]
+    consumers: []
+  - name: /peach/vegetation/leaf_mask
+    kind: topic
+    type: sensor_msgs/msg/Image
+    qos: {reliability: reliable, durability: volatile, depth: 10}
+    producers: [peach_vegetation]
+    consumers: []   # 影子能力：不进 harvest_system；不写 PlanningScene
+  - name: /peach/vegetation/branch_mask
+    kind: topic
+    type: sensor_msgs/msg/Image
+    qos: {reliability: reliable, durability: volatile, depth: 10}
+    producers: [peach_vegetation]
+    consumers: []
+  - name: /peach/vegetation/overlay
+    kind: topic
+    type: sensor_msgs/msg/Image
+    qos: {reliability: reliable, durability: volatile, depth: 10}
+    producers: [peach_vegetation]
+    consumers: []
+  - name: /peach/vegetation/status
+    kind: topic
+    type: std_msgs/msg/String
+    qos: {reliability: reliable, durability: volatile, depth: 10}
+    producers: [peach_vegetation]
+    consumers: [peach_observability]
+
+# 预留：固定座归档的导航适配（_archive/parked_2026-09/peach_navigation）。
+# 真底盘授权后恢复接线；现行核心栈不发布/不消费这些名字。
+reserved_interfaces:
+  - name: /peach_navigation_node/navigate_to_worksite
+    kind: action
+    type: peach_interfaces/action/NavigateToWorksite
+    producers: []
+    consumers: [peach_supervisor]
+  - name: /peach/navigation/target_report
+    kind: topic
+    type: peach_interfaces/msg/HarvestTargetReport
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: []
+    consumers: []
+  - name: /peach/navigation/vehicle_state
+    kind: topic
+    type: peach_interfaces/msg/VehicleState
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: []
+    consumers: []
+  - name: /peach/navigation/arm_status
+    kind: topic
+    type: peach_interfaces/msg/HarvestOperationStatus
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
+    producers: []
+    consumers: []
+  # 仿真桥接线（peach_sim，决策 0028）：gz JointStatePublisher 的 gz 侧话题
+  # （gz.msgs.Model），ros_gz_bridge 在 launch 内 remap 成 /joint_states——
+  # 该名字本身不落 ROS 图，登记仅供反向扫描与名字清单一致，非跨包契约。
+  - name: /peach_sim/joint_states
+    kind: topic
+    type: sensor_msgs/msg/JointState
+    producers: []
+    consumers: []

@@ -1,0 +1,47 @@
+# 跨包稳定数值失败码。事件、账本、GraspDecision / ExecuteTarget.Result 写本常量，
+# 不得解析自由文本 reason。本类型也可作为「码+名」载荷携带，但线上多只填 uint32 字段。
+
+uint32 NONE=0                       # 无失败
+uint32 OBSERVE_FAILED=1             # 观察失败（视角/掩膜/静止门）
+uint32 BUILD_FAILED=2               # BuildTargetModel 失败或超时
+uint32 DECISION_REJECTED=3          # GraspDecision 拒绝套入
+uint32 PREGRASP_RESIDUAL=4          # 预抓取残差未过
+uint32 SLEEVE_PLAN_FAILED=5         # 套入规划失败
+uint32 CUT_COMMAND_FAILED=6         # 刀指令发送/受理失败
+uint32 CUT_FEEDBACK_TIMEOUT=7       # 切断反馈超时（无硬件反馈时不得 CUT_CONFIRMED）
+uint32 RETREAT_FAILED=8             # 撤退失败
+uint32 RECOVERY_REQUIRED=9          # 须人工 ACK 才允许下一颗
+uint32 VEHICLE_NOT_STATIONARY=10    # 车未静止（导航预留）
+uint32 EXACT_TF_MISSING=11          # 缺图像时刻精确 TF（重建禁止 latest）
+uint32 DYNAMIC_BUDGET_NEGATIVE=12   # 动态径向/轴向余量为负
+uint32 UNBAGGED_NOT_IN_SCOPE=13     # 未套袋目标不在本产品范围
+uint32 DEGRADED_CONTACT_FORBIDDEN=14  # 禁止用单帧/降级锚点接触
+uint32 MODEL_STALE=15               # 模型与当前 target_id / scene_epoch 不符
+uint32 CORRIDOR_BLOCKED=16          # 插入走廊被挡
+uint32 MODEL_IDENTITY_INCOMPLETE=17 # 身份元组缺版本，拒执行
+uint32 MODEL_EXPIRED=18             # valid_until 已过
+uint32 TOOL_STATE_UNKNOWN=19        # SetIO 超时/无反馈；不自动撤退/重发
+uint32 PLAN_MISMATCH=20             # 预览与执行 plan_id / 模型元组不一致
+uint32 TRANSIT_FAILED=21            # MoveTo 转移移动失败（不再挪用套入码）
+uint32 START_NOT_READY=22           # 周期启动门拒绝（MoveIt 未初始化/占用/未 arm）
+uint32 CANCELED=23                  # 动作被取消（BuildTargetModel 等取消终局）
+
+
+# Supervisor / dispatch stable codes (do not use free-form strings).
+uint32 EXECUTION_DISABLED=24      # 执行/接触/工具使能未开
+uint32 BUILD_REJECTED=25          # 并行 Build 质量拒绝
+uint32 BUILD_START_TIMEOUT=26     # 重建未在时限内进入 COLLECTING
+uint32 OBSERVE_BUILD_VIEW_RACE=27 # OBSERVE 与 Build 机位竞争
+uint32 TIMEOUT=28                 # 单果/动作时限
+uint32 FULL_FAILED=29             # FULL 动作失败
+uint32 SKIPPED_QUALITY=30         # 质量门跳过
+uint32 SKIPPED_UNREACHABLE=31     # 不可达跳过
+
+uint32 BUILD_TIMEOUT_EXECUTOR=32       # executor waited for reconstruction timeout
+uint32 BUILD_TIMEOUT_RECONSTRUCTION=33 # reconstruction reported timeout
+uint32 BUILD_FINALIZE_FAILED=34        # finalize failed after capture
+
+uint32 CUT_FRUIT_CLEARANCE=35     # cut plane too close to fruit
+
+uint32 code                         # 上列常量之一
+string name                         # 常量名（如 BUILD_FAILED）；可空，以 code 为准

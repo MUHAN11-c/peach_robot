@@ -1,0 +1,138 @@
+Panels:
+- Class: rviz_common/Displays
+  Name: Displays
+- Class: rviz_common/Views
+  Name: Views
+- Class: rviz_common/Time
+  Name: Time
+Visualization Manager:
+  Class: ''
+  Global Options:
+    Background Color: 42; 45; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  Displays:
+  - Class: rviz_default_plugins/Grid
+    Name: Grid
+    Enabled: true
+    Cell Size: 1
+    Plane Cell Count: 20
+    Color: 110; 110; 110
+  - Class: rviz_default_plugins/RobotModel
+    Name: Harvester
+    Enabled: true
+    Alpha: 1
+    Description Source: Topic
+    Description Topic:
+      Value: /robot_description
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Depth: 1
+    Visual Enabled: true
+    Collision Enabled: false
+  - Class: rviz_default_plugins/Map
+    Name: Navigation map
+    Enabled: true
+    Alpha: 0.7
+    Topic:
+      Value: /map
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/LaserScan
+    Name: Lidar
+    Enabled: true
+    Size (m): 0.015
+    Style: Points
+    Color Transformer: FlatColor
+    Color: 60; 180; 240
+    Topic:
+      Value: /scan
+      Reliability Policy: Best Effort
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Depth: 5
+  - Class: rviz_default_plugins/Path
+    Name: Nav2 path
+    Enabled: true
+    Color: 80; 200; 100
+    Line Style: Lines
+    Line Width: 0.035
+    Topic:
+      Value: /plan
+      Reliability Policy: Reliable
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Targets and mission
+    Enabled: true
+    Topic:
+      Value: /sim_harvest/targets
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Depth: 1
+  - Class: moveit_rviz_plugin/PlanningScene
+    Name: MoveIt collision scene
+    Enabled: true
+    Planning Scene Topic: /monitored_planning_scene
+    Robot Description: robot_description
+    Scene Geometry:
+      Scene Alpha: 0.7
+      Scene Color: 80; 150; 90
+      Show Scene Geometry: true
+    Scene Robot:
+      Robot Alpha: 0.5
+      Show Robot Visual: false
+      Show Robot Collision: false
+  - Class: moveit_rviz_plugin/Trajectory
+    Name: MoveIt planned trajectory (optional)
+    Enabled: false
+    Robot Description: robot_description
+    Topic: /display_planned_path
+    State Display Time: 0.1 s
+    Loop Animation: false
+    Trajectory Topic: /display_planned_path
+  - Class: rviz_default_plugins/Camera
+    Name: Wrist RGB camera (optional)
+    Enabled: false
+    Image Rendering: background and overlay
+    Topic:
+      Value: /camera/color/image_raw
+      Reliability Policy: Best Effort
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/TF
+    Name: TF (optional)
+    Enabled: false
+  Tools:
+  - Class: rviz_default_plugins/Interact
+  - Class: rviz_default_plugins/MoveCamera
+  - Class: rviz_default_plugins/Select
+  - Class: rviz_default_plugins/SetInitialPose
+    Topic:
+      Value: /initialpose
+  - Class: rviz_default_plugins/SetGoal
+    Topic:
+      Value: /goal_pose
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 5
+      Pitch: 0.7
+      Yaw: 0.8
+      Target Frame: platform_base_link
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0.65
+Window Geometry:
+  Width: 1400
+  Height: 900
+  X: 40
+  Y: 40
+  QMainWindow State: 000000ff00000000fd0000000300000000000001400000031dfc0200000001fb000000100044006900730070006c00610079007301000000000000031d0000006100ffffff00000001000000f00000031dfc0200000001fb0000000a0056006900650077007301000000000000031d0000006100ffffff000000030000057800000061fc0100000001fb0000000800540069006d00650100000000000005780000004700ffffff0000033c0000031d00000004000000040000000800000008fc00000000

@@ -1,0 +1,1779 @@
+"""
+桃子采摘链路监控 Web：过程记录 / 监控 / 轨迹 + 单步调试（同端口 8090）.
+
+只读面回答「现在跑到哪一步、坐标是什么、TCP 怎么走的」；过程记录为会话
+级 MCAP bag（决策 0019：随节点启停开合，栈停自动出 bag_report 并按预算
+回收旧 bag）。节点只接线；阶段时间线 / 账本直播 / 地标合并在 pipeline.py。调试 POST /api/debug/<action> 转发既有动作/服务（决策 0018：
+无令牌）。debug.enabled 默认开（回环）；动臂另需 debug.motion_enabled
+（默认关→423）。技能侧 ExecutionAuthority 等既有安全门不受影响：Web 只是
+又一个客户端。
+"""
+
+from __future__ import annotations
+
+from collections import deque
+import json
+from pathlib import Path
+import subprocess
+import sys
+import threading
+import time
+
+from ament_index_python.packages import get_package_share_directory
+from aubo_msgs.msg import JointStatus, RobotStatus
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus
+from diagnostic_updater import Updater
+from geometry_msgs.msg import Vector3Stamped
+from nav_msgs.msg import Path as NavPath
+from peach_common.lifecycle import ensure_lifecycle_active
+from peach_common.paths import runs_root as resolve_runs_root
+from peach_interfaces.msg import (
+    BagFittingArray,
+    BagGraspCandidateArray,
+    CanonicalEvent,
+    ForceSample,
+    GraspDecision,
+    GraspHypothesis,
+    HarvestState,
+    PeachTargetObservationArray,
+    ReconstructionStatus,
+    SceneSnapshot,
+)
+from rcl_interfaces.msg import Log as RosoutLog
+from rcl_interfaces.srv import GetParameters
+import rclpy
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.lifecycle import LifecycleNode, TransitionCallbackReturn
+from rclpy.qos import (
+    DurabilityPolicy, qos_profile_sensor_data, QoSProfile, ReliabilityPolicy)
+from sensor_msgs.msg import Image, JointState, PointCloud2
+from std_msgs.msg import String
+from tf2_msgs.msg import TFMessage
+from tf2_ros import TransformException
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
+from visualization_msgs.msg import MarkerArray
+
+from . import http_server
+from . import pipeline
+from . import retention
+from .catch_all_recorder import CatchAllRecorder
+from .debug_actions import DebugAudit, DebugBridge, is_motion
+from .image_preview import ImagePreview
+from .params import ObservabilityParams
+from .recorder import Recorder
+from .selfcheck.runner import SelfCheckRunner
+from .startup_facts import (
+    facts_valid,
+    flag_enabled,
+    normalize_facts,
+    parse_facts_json,
+)
+from .state import (
+    merge_joint_hardware,
+    MetricsSampler,
+    ObservabilityState,
+    parse_json_text,
+    to_candidate_array,
+    to_fitting_array,
+    to_grasp_decision,
+    to_grasp_hypothesis,
+    to_harvest_event,
+    to_joint_state,
+    to_joint_status,
+    to_reconstruction_status,
+    to_robot_status,
+    to_target_observations,
+    to_task_executor_state,
+    to_vector_stamped,
+)
+from .tcp_trajectory import (
+    build_selection_marker_dicts,
+    build_tcp_marker_dicts,
+    downsample_path,
+    marker_array_from_dicts,
+    path_from_xyz,
+    TcpPathBuffer,
+)
+from .web_streams import WEB_TOPICS, WebStreams
+
+
+# 过程监测需要回答「当前以什么参数在跑」：按节点分组的只读参数白名单。
+PARAM_WATCHLIST = {
+    '/peach_scene_perception_node': [
+        'yolo_conf', 'min_detection_conf',
+        'target_memory.match_radius_m', 'target_memory.recovery_scale',
+        'target_memory.confirm_frames',
+        'harvest.min_collect_frames', 'harvest.lock_settle_frames',
+        'harvest.max_collect_s', 'harvest.priority_prefer_lower_first',
+    ],
+    '/peach_target_reconstruction_node': [
+        'capture.min_views', 'capture.recommended_views',
+        'capture.min_mask_depth_ratio', 'capture.require_target_mask',
+        'icp.enable', 'tsdf.enable',
+        'capture.require_robot_static', 'capture.static_joint_vel_thresh',
+        'capture.joint_state_tolerance_s', 'capture.max_frame_age_s',
+        'refit.max_axis_angle_deg',
+    ],
+    '/peach_arm': [
+        'moveit.velocity_scaling', 'moveit.acceleration_scaling',
+        'moveit.transit_velocity_scaling', 'moveit.transit_acceleration_scaling',
+        'scan.observation_radius_m', 'scan.minimum_radius_m',
+        'scan.frame_wait_s', 'scan.maximum_moves',
+        'quality.minimum_views', 'quality.minimum_baseline_deg',
+        'execution.enabled', 'grasp.enabled', 'tool.enabled',
+        'photo_pose_joint_tolerance_rad', 'photo_pose_max_joint_vel_rad_s',
+    ],
+    '/peach_supervisor': [
+        'execution_enabled', 'survey_wait_s', 'survey_dwell_s',
+        'execute_pregrasp_only', 'reconstruct_in_trajectory',
+        'empty_survey_limit',
+        'persist_ledger',
+    ],
+}
+_PARAM_REQUEST_TIMEOUT_S = 2.0
+
+
+def _parameter_scalar(value) -> object:
+    """rcl_interfaces/ParameterValue → 标量（数组取列表，未设置给 None）."""
+    kind = value.type
+    if kind == 1:
+        return bool(value.bool_value)
+    if kind == 2:
+        return int(value.integer_value)
+    if kind == 3:
+        return float(value.double_value)
+    if kind == 4:
+        return str(value.string_value)
+    if kind == 6:
+        return [bool(item) for item in value.bool_array_value]
+    if kind == 7:
+        return [int(item) for item in value.integer_array_value]
+    if kind == 8:
+        return [float(item) for item in value.double_array_value]
+    if kind == 9:
+        return [str(item) for item in value.string_array_value]
+    return None
+
+
+# 核心订阅表（镜像 + 落盘）：(消息类型, 话题参数名, 回调属性名, QoS 档名)。
+# W10 表驱动化：新增订阅=表加一行，不再往 _create_subscriptions 堆平铺。
+_CORE_SUBSCRIPTIONS = (
+    (PeachTargetObservationArray, 'target_observations_topic',
+     '_targets_callback', 'reliable'),
+    (String, 'harvest_state_topic', '_harvest_callback', 'latched'),
+    (String, 'reconstruction_status_topic',
+     '_recon_status_callback', 'latched'),
+    (ReconstructionStatus, 'reconstruction_diagnostics_topic',
+     '_recon_diagnostics_callback', 'latched'),
+    # 调试明细（tsdf/registration/overlap/refined/逐机位）：并入镜像与落盘，
+    # 保持「类型化后过程数据不缩水」；类型化字段为准，明细键补充
+    (String, 'reconstruction_diagnostics_debug_topic',
+     '_recon_debug_callback', 'latched'),
+    (GraspDecision, 'grasp_decision_topic', '_recon_decision_callback',
+     'latched'),
+    (BagGraspCandidateArray, 'refined_pose_topic', '_refined_pose_callback',
+     'latched'),
+    (Vector3Stamped, 'refined_axis_topic', '_refined_axis_callback',
+     'latched'),
+    (BagFittingArray, 'refined_diagnostics_topic',
+     '_refined_diagnostics_callback', 'latched'),
+    (String, 'manipulation_status_topic', '_manipulation_callback',
+     'latched'),
+    (GraspHypothesis, 'grasp_hypothesis_topic', '_grasp_hypothesis_callback',
+     'latched'),
+    (HarvestState, 'task_executor_state_topic', '_task_executor_callback',
+     'latched'),
+    (CanonicalEvent, 'task_executor_events_topic', '_events_callback',
+     'events'),
+    (RobotStatus, 'robot_status_topic', '_robot_status_callback',
+     'reliable'),
+    (JointState, 'joint_states_topic', '_joint_state_callback', 'sensor'),
+    (JointStatus, 'joint_status_topic', '_joint_status_callback',
+     'reliable'),
+)
+
+# bag 专用 raw 订阅（只落盘不镜像）：(消息类型, 话题参数名, QoS 档名,
+# 门控参数属性名)。/rosout 另订，页面环与 bag 共用一条回调。
+_RAW_SUBSCRIPTIONS = (
+    (PointCloud2, 'tsdf_cloud_topic', 'latched', 'record_save_clouds'),
+    # SceneSnapshot 单发闩锁（M13）：落盘订阅须 transient_local，VOLATILE
+    # 会在记录节点晚于发布启动时永久丢单发快照
+    (SceneSnapshot, 'scene_snapshot_topic', 'latched', None),
+    (TFMessage, 'tf_topic', 'tf', None),
+    (TFMessage, 'tf_static_topic', 'tf_static', None),
+)
+
+
+class ObservabilityNode(LifecycleNode):
+    """订阅采摘链路各阶段输出，提供过程监控 API 与单步调试 POST."""
+
+    def __init__(self):
+        """声明参数；订阅与 HTTP 等到 configure / activate."""
+        super().__init__('peach_observability')
+        self._params = None
+        self._state = ObservabilityState()
+        self._http = None
+        self._metrics = None
+        self._recorder = None
+        self._catch_all = None
+        self._subs = []
+        self._param_clients = {}
+        self._param_timer = None
+        self._param_lock = threading.Lock()
+        self._param_inflight = {}
+        # 轮询定时器/参数服务回调与订阅回调共享再入组（触发状态镜像并发写）。
+        self._cb = ReentrantCallbackGroup()
+        # 重建镜像合并缓存：调试 JSON 明细（tsdf/registration/refined 等）与
+        # 最近一次许可镜像——类型化诊断到达时并入，保持镜像/落盘信息不缩水
+        self._recon_debug_extra: dict = {}
+        self._recon_typed_value: dict = {}
+        self._recon_debug_context: dict | None = None
+        self._recon_decision_value: dict | None = None
+        self._image_preview = None
+        self._tool_frames = {}
+        self._tf_buffer = None
+        self._tf_listener = None
+        self._traj_timer = None
+        self._tcp_path = None
+        self._tcp_path_pub = None
+        self._tcp_marker_pub = None
+        self._traj_landmarks = {}
+        self._last_viz_ns = 0
+        self._last_marker_sig = None
+        self._traj_ctx = {
+            'moving': False,
+            'target_id': '',
+            'phase': 0,
+            'skill': '',
+        }
+        self._traj_run_id = ''
+        self._traj_target_id = ''
+        self._joint_state = {}
+        self._joint_status = {}
+        self._force_sample = None
+        self._force_rx_ns = 0
+        self._joints_push_t = 0.0
+        # TCP 可视化缓存（RViz 5Hz 与 HTTP /api/trajectory 共享一次构建）
+        self._viz_bundle = ([], [], [])
+        self._viz_bundle_sig = None
+        # configure 期体积回收线程（rglob 全部 bag 目录，大库下秒级）
+        self._sweep_thread: threading.Thread | None = None
+        # 派生话题（job/metrics 进 bag）与作业票指纹去重
+        self._job_pub = None
+        self._metrics_pub = None
+        self._last_job_key = None
+        # 分析仅在 bag 封口后启动；独立进程可在停栈预算内终止并回收。
+        self._report_process: subprocess.Popen | None = None
+        # 调试 POST（debug.enabled=true 才建桥）
+        self._debug_bridge: DebugBridge | None = None
+        self._debug_audit: DebugAudit | None = None
+        self._param_bridge = None
+        # 全流程时序跟踪器（pipeline.py 纯核）：调度 FSM / 技能周期
+        self._fsm_tracker = pipeline.StageTracker(limit=150)
+        self._arm_tracker = pipeline.StageTracker(limit=150)
+        # 批次账本直播（runs/<request_id>/ledger.json；run_id==request_id）
+        self._ledger_watch: pipeline.LedgerWatch | None = None
+        self._ledger_request_id = ''
+        self._ledger_state_key: tuple | None = None
+        self._ledger_context_lock = threading.Lock()
+        self._ledger_refresh_lock = threading.Lock()
+        # /diagnostics 双轨（W15：对齐 peach_arm W5 / vegetation 的做法）
+        self._diag: Updater | None = None
+        # /diagnostics 聚合防御计数（畸形条目跳过；节流告警）
+        self._diag_malformed_count = 0
+        self._diag_malformed_last_s = 0.0
+        # 启动自检（P0）：探针 + 周期检查 + 闩锁 selfcheck_passed + 会话工件
+        self._selfcheck: SelfCheckRunner | None = None
+        self._startup_thread: threading.Thread | None = None
+        self._startup_stop: threading.Event | None = None
+        # /rosout 页面环（与 bag 解耦；丢最旧）。configure 后按 log_buffer_size 定长
+        self._log_lock = threading.Lock()
+        self._logs: deque = deque(maxlen=200)
+
+    def on_configure(self, state):
+        del state
+        if self._recorder is not None or self._startup_thread is not None or self._subs:
+            self.get_logger().error('configure 拒绝：上一会话资源尚未释放')
+            return TransitionCallbackReturn.FAILURE
+        try:
+            self._params = ObservabilityParams.attach(self)
+        except Exception as exc:  # noqa: BLE001 参数库校验异常类型跨 rclpy 版本
+            self.get_logger().error(f'参数非法: {exc}')
+            return TransitionCallbackReturn.FAILURE
+        self._resize_logs(int(self._params.log_buffer_size))
+        runs_root = resolve_runs_root(self._params.record_root_dir)
+        self._ledger_watch = pipeline.LedgerWatch(runs_root)
+        # 会话 bag 开启前先跑一次体积回收（超预算清最旧 bag，写审计）。
+        # rglob 全部 bag 目录在 20GB 库下秒级阻塞 configure，挪后台线程；
+        # 可与停栈报告子进程的 sweep 并发；已删除候选跳过，删除失败告警。
+        self._sweep_thread = threading.Thread(
+            target=retention.sweep,
+            args=(runs_root, self._params.record_max_total_bag_gb),
+            kwargs={'log_warning': lambda msg: self.get_logger().warning(msg)},
+            name='peach-retention', daemon=True)
+        self._sweep_thread.start()
+        self._recorder = Recorder(
+            root_dir=str(runs_root),
+            enabled=self._params.record_enabled,
+            queue_depth=self._params.record_queue_depth,
+            on_info=lambda info: self._state.update('record', 'info', info),
+            log_warning=lambda msg: self.get_logger().warning(msg),
+            limit_perception_media=self._params.record_level != 'all')
+        self._state.set_record_info_source(self._recorder.info)
+        self._spawn_startup_facts_writer(runs_root)
+        if self._params.selfcheck_enabled:
+            self._selfcheck = SelfCheckRunner(
+                self, self._params, runs_root,
+                session_dir_of=lambda: (
+                    self._recorder.session_dir
+                    if self._recorder is not None else None))
+        self._job_pub = self.create_publisher(
+            String, self._topic('job_topic'), 10)
+        self._metrics_pub = self.create_publisher(
+            String, self._topic('metrics_topic'), 10)
+        self._image_preview = ImagePreview()
+        self._create_subscriptions()
+        self._create_param_watchers()
+        self._create_metrics_sampler()
+        self._create_tcp_sampler()
+        self._create_debug_bridge()
+        self._create_diagnostics()
+        return TransitionCallbackReturn.SUCCESS
+
+    def on_activate(self, state):
+        result = super().on_activate(state)
+        self.start_http()
+        self._web_streams = WebStreams(self)
+        if self._selfcheck is not None:
+            self._selfcheck.start()
+        # activate 后按 record.level 发现固定写者之外的补充话题；
+        # std 用白名单，all 放开白名单，但均保留排除集及 Recorder 限速。
+        if (self._recorder is not None and self._recorder.enabled
+                and self._params.record_level in ('all', 'std')):
+            self._catch_all = CatchAllRecorder(
+                self, self._recorder, level=self._params.record_level,
+                excluded_topics=self._owned_recording_topics())
+            self._catch_all.start()
+        return result
+
+    def on_deactivate(self, state):
+        if self._catch_all is not None:
+            self._catch_all.stop()
+            self._catch_all = None
+        if self._selfcheck is not None:
+            self._selfcheck.stop()
+        self._stop_runtime()
+        return super().on_deactivate(state)
+
+    def on_cleanup(self, state):
+        self._stop_runtime()
+        try:
+            self._release_resources()
+        except RuntimeError as error:
+            self.get_logger().error(f'cleanup 未完成: {error}')
+            return TransitionCallbackReturn.FAILURE
+        return super().on_cleanup(state)
+
+    def on_shutdown(self, state):
+        """Shutdown 同样停止 HTTP、线程与订阅，不等待进程退出才释放资源."""
+        self._stop_runtime()
+        try:
+            self._release_resources()
+        except RuntimeError as error:
+            self.get_logger().error(f'shutdown 未完成: {error}')
+            return TransitionCallbackReturn.FAILURE
+        return super().on_shutdown(state)
+
+    def _record_raw(self, topic_parameter: str, message) -> None:
+        """把原始消息按话题参数名解析后入会话 bag（未启用时记录器自丢）."""
+        if self._recorder is None:
+            return
+        self._recorder.handle_raw(self._topic(topic_parameter), message)
+
+    def _mark_perception_segment(self) -> None:
+        """结果出现时打开数秒感知进袋窗口。实时预览不走这里."""
+        recorder = self._recorder
+        if recorder is not None:
+            recorder.mark_perception_segment()
+
+    def _raw_cb(self, topic_parameter: str):
+        """订阅回调工厂：原样把消息送进会话 bag（bag 专用订阅用）."""
+        def callback(message) -> None:
+            self._record_raw(topic_parameter, message)
+        return callback
+
+    def _image_cb(self, stream: str, topic_parameter: str):
+        """预览与 bag 复用同一订阅，bag 保存仍遵守原有开关."""
+        def callback(message):
+            preview = self._image_preview
+            if preview is not None:
+                preview.submit(stream, message)
+            if (self._params is not None and self._params.record_enabled
+                    and getattr(self._params, 'record_level', 'core') == 'all'):
+                self._record_raw(topic_parameter, message)
+            elif (self._params is not None and self._params.record_enabled
+                    and stream != 'raw' and self._params.record_save_images):
+                # 稳定识别图只在结果关键段进袋；即时检测图只留给页面预览。
+                self._record_raw(topic_parameter, message)
+        return callback
+
+    def _resize_logs(self, limit: int) -> None:
+        """按 log_buffer_size 重建环，保留最新条目."""
+        size = max(1, int(limit))
+        with self._log_lock:
+            if self._logs.maxlen == size:
+                return
+            self._logs = deque(self._logs, maxlen=size)
+
+    def _append_rosout(self, message) -> None:
+        """rcl_interfaces/Log → 页面行：stamp/level/name/msg，消息截到 400 字."""
+        text = str(getattr(message, 'msg', '') or '')
+        if len(text) > 400:
+            text = text[:400]
+        stamp = getattr(message, 'stamp', None)
+        sec = float(getattr(stamp, 'sec', 0) or 0)
+        nsec = float(getattr(stamp, 'nanosec', 0) or 0)
+        row = {
+            'stamp': sec + nsec * 1e-9,
+            'level': int(getattr(message, 'level', 0) or 0),
+            'name': str(getattr(message, 'name', '') or ''),
+            'msg': text,
+        }
+        limit = (
+            int(self._params.log_buffer_size) if self._params is not None
+            else 200)
+        size = max(1, int(limit))
+        with self._log_lock:
+            if self._logs.maxlen != size:
+                self._logs = deque(self._logs, maxlen=size)
+            self._logs.append(row)
+
+    def _rosout_callback(self, message) -> None:
+        """节点日志进页面环；record.rosout 开启时同一条再进会话 bag."""
+        self._append_rosout(message)
+        if (
+            self._recorder is not None and self._params is not None
+            and self._params.record_rosout
+        ):
+            self._recorder.handle_raw('/rosout', message)
+
+    def _topic(self, parameter: str) -> str:
+        """从不可变快照取话题名（启动期建订阅用）."""
+        return self._params.topics[parameter]
+
+    def _subscribe(self, *args, **kwargs):
+        """建订阅并记下句柄，供 on_cleanup 释放."""
+        sub = self.create_subscription(*args, **kwargs)
+        self._subs.append(sub)
+        return sub
+
+    def _owned_recording_topics(self) -> set[str]:
+        """固定回调拥有唯一写袋权；通配仅补充其余话题，避免事件双写."""
+        topics = {self._topic(row[1]) for row in _CORE_SUBSCRIPTIONS}
+        topics.update(self._topic(param)
+                      for _, param, _, gate in _RAW_SUBSCRIPTIONS
+                      if gate is None or getattr(self._params, gate))
+        topics.update(self._topic(name) for name in (
+            'debug_image_topic', 'debug_image_raw_topic', 'job_topic', 'metrics_topic'))
+        topics.add(self.resolve_topic_name('force/sample'))
+        topics.update(self.resolve_topic_name(name) for name in WEB_TOPICS.values())
+        return topics
+
+    def _create_subscriptions(self) -> None:
+        """按订阅表建立全部只读订阅（核心镜像表 + bag raw 表）."""
+        profiles = {
+            'latched': QoSProfile(
+                depth=1,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                reliability=ReliabilityPolicy.RELIABLE),
+            'reliable': QoSProfile(
+                depth=10, reliability=ReliabilityPolicy.RELIABLE),
+            'sensor': qos_profile_sensor_data,
+            'events': QoSProfile(
+                depth=50,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                reliability=ReliabilityPolicy.RELIABLE),
+            'tf': QoSProfile(
+                depth=200, reliability=ReliabilityPolicy.RELIABLE),
+            'tf_static': QoSProfile(
+                depth=100,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                reliability=ReliabilityPolicy.RELIABLE),
+        }
+        for msg_type, param, callback_name, profile in _CORE_SUBSCRIPTIONS:
+            self._subscribe(
+                msg_type, self._topic(param),
+                getattr(self, callback_name), profiles[profile])
+        # /diagnostics 聚合订阅（L3 消费闭环：各节点诊断任务 → /api/state）。
+        # QoS 取传感档（BEST_EFFORT）：栈内诊断发布端（ros2_control/Nav2/
+        # peach_arm 等 C++ updater 实测 BEST_EFFORT），RELIABLE 订户收不到
+        # （E2E 五轮实锤：catch-all BE 全收、RELIABLE 镜像零帧）——BE 订户
+        # 与 BE/RELIABLE 发布端均兼容，诊断本就允许丢帧。
+        self._subscribe(
+            DiagnosticArray, '/diagnostics', self._diagnostics_callback,
+            qos_profile_sensor_data)
+        # /rosout 始终进页面环。bag 由回调里的 record.rosout 门控，不另订一条。
+        self._subscribe(
+            RosoutLog, '/rosout', self._rosout_callback, profiles['reliable'])
+        # 只读 JPEG 独立于会话录制，每流只建一条 RELIABLE 订阅.
+        for stream, param in (('perception', 'debug_image_topic'),
+                              ('raw', 'debug_image_raw_topic')):
+            self._subscribe(Image, self._topic(param),
+                            self._image_cb(stream, param), profiles['reliable'])
+        # Atomic force frames drive both the live panel and bag evidence.
+        self._subscribe(
+            ForceSample, 'force/sample', self._force_callback,
+            QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE))
+        # 其余 raw 订阅仍仅在对应记录开关开启时建立.
+        if not self._params.record_enabled:
+            return
+        for msg_type, param, profile, gate in _RAW_SUBSCRIPTIONS:
+            if gate is not None and not getattr(self._params, gate):
+                continue
+            self._subscribe(
+                msg_type, self._topic(param), self._raw_cb(param),
+                profiles[profile])
+
+    def _force_callback(self, message: ForceSample) -> None:
+        """Store the latest atomic force frame and optionally write it to the bag."""
+        self._force_sample = message
+        self._force_rx_ns = self.get_clock().now().nanoseconds
+        if self._recorder is not None and self._params is not None \
+                and self._params.record_enabled:
+            self._recorder.handle_raw(
+                self.resolve_topic_name('force/sample'), message)
+
+    def _robot_status_callback(self, message: RobotStatus) -> None:
+        """机械臂柜侧状态；in_motion 给 TCP 采样当运动标记."""
+        self._traj_ctx['moving'] = bool(message.in_motion)
+        self._state.update('robot', 'status', to_robot_status(message))
+        self._record_raw('robot_status_topic', message)
+
+    def _diagnostics_callback(self, message: DiagnosticArray) -> None:
+        """
+        /diagnostics 本帧按 hardware_id 归组，状态缓存按任务跨帧合并.
+
+        防御式（2026-09-29 E2E 实锤）：本进程镜像订阅上 status.level 曾
+        整体反序列化为 bytes（bag 侧同字节正常；疑 venv/系统 python 类型
+        支持混布，根因挂账）——按 bytes/int 双形态容错解码，坏条目跳过并
+        节流告警，聚合器绝不炸节点。
+        """
+        def as_int(raw):
+            if isinstance(raw, (bytes, bytearray)):
+                return int.from_bytes(raw, 'little')
+            return int(raw)
+
+        def as_text(raw):
+            if isinstance(raw, (bytes, bytearray)):
+                return raw.decode('utf-8', 'replace')
+            return str(raw)
+
+        stamp_s = (message.header.stamp.sec
+                   + message.header.stamp.nanosec * 1e-9)
+        nodes: dict = {}
+        for status in message.status:
+            try:
+                level = as_int(status.level)
+                node = as_text(status.hardware_id)
+                tasks_values = {
+                    as_text(item.key): as_text(item.value)
+                    for item in status.values}
+                name = as_text(status.name)
+                text = as_text(status.message)
+            except (TypeError, ValueError, AttributeError) as exc:
+                now = time.monotonic()
+                if now - self._diag_malformed_last_s > 60.0:
+                    self._diag_malformed_last_s = now
+                    self.get_logger().warning(
+                        f'/diagnostics 畸形条目已跳过（累计 '
+                        f'{self._diag_malformed_count + 1} 条）: {exc}')
+                self._diag_malformed_count += 1
+                continue
+            entry = nodes.setdefault(
+                node, {'level': 0, 'tasks': {}, 'stamp': stamp_s})
+            entry['level'] = max(entry['level'], level)
+            entry['tasks'][name] = {
+                'level': level,
+                'message': text,
+                'values': tasks_values,
+            }
+        if nodes:
+            self._state.update_diagnostics(nodes)
+
+    def _joint_state_callback(self, message: JointState) -> None:
+        """实际关节角/速度；与 joint_status 合成硬件表（约 10 Hz 推镜像）."""
+        self._joint_state = to_joint_state(message)
+        self._record_raw('joint_states_topic', message)
+        self._push_joints()
+
+    def _joint_status_callback(self, message: JointStatus) -> None:
+        """柜侧关节电流/温度/跟随误差；与 /joint_states 合成硬件表."""
+        self._joint_status = to_joint_status(message)
+        self._record_raw('joint_status_topic', message)
+        self._push_joints()
+
+    def _push_joints(self) -> None:
+        """把最新关节实际量与柜侧明细合成 robot.joints（限 10 Hz）."""
+        now = time.monotonic()
+        if now - self._joints_push_t < 0.1:
+            return
+        self._joints_push_t = now
+        self._state.update(
+            'robot', 'joints',
+            merge_joint_hardware(self._joint_state, self._joint_status))
+
+    def _harvest_callback(self, message: String) -> None:
+        """
+        感知采摘计划：进状态缓存并进会话 bag.
+
+        JSON 全量透传：发布侧新增键（如阶段 D1 的 anchor_stale_target_ids/
+        out_of_view_target_ids/dropped_target_ids/lighting/low_light_quality）
+        无需本侧改动即进入 /api/state 镜像。
+        """
+        value = parse_json_text(message.data)
+        self._state.update('perception', 'harvest', value)
+        self._record_raw('harvest_state_topic', message)
+        self._publish_job()
+
+    def _recon_status_callback(self, message: String) -> None:
+        """重建状态文本：进状态缓存并进会话 bag."""
+        value = parse_json_text(message.data, 'state')
+        self._state.update('reconstruction', 'status', value)
+        self._record_raw('reconstruction_status_topic', message)
+
+    def _recon_diagnostics_callback(
+            self, message: ReconstructionStatus) -> None:
+        """
+        重建 1Hz 结构化诊断：消息字段重建镜像 dict 并进会话 bag.
+
+        bag 录原始话题；合并体（调试明细 ∪ 类型化字段 ∪ 最近许可镜像）
+        由 bag_report 离线重放，镜像侧保持合并以便前端消费。
+        """
+        self._recon_typed_value = to_reconstruction_status(message)
+        self._publish_recon_diagnostics()
+        self._record_raw('reconstruction_diagnostics_topic', message)
+        state = str(getattr(message, 'state', '') or '')
+        previous = getattr(self, '_recon_record_state', '')
+        if state != previous and state in ('COLLECTING', 'READY'):
+            self._mark_perception_segment()
+        self._recon_record_state = state
+
+    def _raw_refined_context(self) -> dict | None:
+        """仅原始身份与当下感知观察一致时绑定只读来源，不猜 revision."""
+        targets = self._state.snapshot().get('perception', {}).get('targets', {})
+        return pipeline.refined_source_context(self._recon_debug_extra, targets)
+
+    def _publish_recon_diagnostics(self) -> None:
+        """原始与类型化诊断共用合并：typed 覆盖状态，但不重写 raw 来源身份."""
+        merged = pipeline.merge_reconstruction_diagnostics(
+            self._recon_debug_extra, getattr(self, '_recon_typed_value', {}),
+            self._recon_decision_value, getattr(self, '_recon_debug_context', None),
+            self._raw_refined_context())
+        center = merged.get('target_center_base')
+        if isinstance(center, list):
+            self._traj_landmarks['reconstruction_center'] = center
+        self._state.update('reconstruction', 'diagnostics', merged)
+
+    def _recon_debug_callback(self, message: String) -> None:
+        """重建调试明细 JSON：更新镜像缓存（bag 另录原始话题，防缺料）."""
+        self._recon_debug_extra = parse_json_text(message.data)
+        self._recon_debug_context = self._raw_refined_context()
+        self._publish_recon_diagnostics()
+        self._record_raw('reconstruction_diagnostics_debug_topic', message)
+
+    def _recon_decision_callback(self, message: GraspDecision) -> None:
+        """重建抓取许可：消息字段重建镜像 dict 并进会话 bag."""
+        value = to_grasp_decision(message)
+        self._recon_decision_value = value
+        self._traj_landmarks['grasp_entry'] = value.get('entry')
+        self._traj_landmarks['grasp_pregrasp'] = value.get('pregrasp')
+        self._traj_landmarks['axis'] = value.get('axis')
+        self._traj_landmarks['target_id'] = value.get('target_id') or ''
+        self._state.update('reconstruction', 'grasp_decision', value)
+        self._record_raw('grasp_decision_topic', message)
+        identity = (
+            str(value.get('target_id') or ''),
+            str(value.get('model_revision') or ''))
+        if (identity[0] and identity[1]
+                and identity != getattr(self, '_decision_record_key', None)):
+            self._decision_record_key = identity
+            self._mark_perception_segment()
+        self._publish_job()
+
+    def _refined_pose_callback(self, message) -> None:
+        """精化位姿：镜像进缓存，原始消息进会话 bag."""
+        self._state.update('refined', 'pose', to_candidate_array(message))
+        self._record_raw('refined_pose_topic', message)
+
+    def _refined_axis_callback(self, message) -> None:
+        """精化轴线：镜像进缓存，原始消息进会话 bag."""
+        self._state.update('refined', 'axis', to_vector_stamped(message))
+        self._record_raw('refined_axis_topic', message)
+
+    def _refined_diagnostics_callback(self, message) -> None:
+        """精化质量：镜像进缓存，原始消息进会话 bag."""
+        self._state.update(
+            'refined', 'diagnostics', to_fitting_array(message))
+        self._record_raw('refined_diagnostics_topic', message)
+
+    def _manipulation_callback(self, message: String) -> None:
+        """技能节点状态：进状态缓存、喂周期时序跟踪器并进会话 bag."""
+        value = parse_json_text(message.data)
+        self._traj_ctx['skill'] = str(value.get('state') or '')
+        self._state.update('manipulation', 'status', value)
+        # 技能周期阶段时序：CycleState/消息/目标任一变化记一条转移，
+        # 段时长=到下一转移的间隔（服务器侧权威，页面刷新不丢）
+        now = time.time()
+        entry = {
+            'state': str(value.get('state') or ''),
+            'message': str(value.get('message') or ''),
+            'target_id': str(value.get('target_id') or ''),
+            'running': bool(value.get('running')),
+            'recovery': bool(value.get('contact_recovery_required')),
+        }
+        key = tuple(entry.items())
+        if self._arm_tracker.feed(key, entry, now):
+            self._state.update(
+                'pipeline', 'arm', self._arm_tracker.export(now))
+        self._record_raw('manipulation_status_topic', message)
+        self._publish_job()
+
+    def _grasp_hypothesis_callback(self, message: GraspHypothesis) -> None:
+        """技能抓取假设：进状态缓存并进会话 bag."""
+        value = to_grasp_hypothesis(message)
+        self._state.update('manipulation', 'hypothesis', value)
+        self._record_raw('grasp_hypothesis_topic', message)
+        self._publish_job()
+
+    def _events_callback(self, message: CanonicalEvent) -> None:
+        """批次事件进环形缓冲与会话 bag，供前端时间线与离线报告消费."""
+        self._record_raw('task_executor_events_topic', message)
+        try:
+            value = to_harvest_event(message)
+        except (AttributeError, TypeError, ValueError) as error:
+            self.get_logger().warning(f'事件转换失败: {error}')
+            return
+        # 缓冲上限来自启动期快照（A9）：已校验 >= 1，运行期不再直读参数
+        self._state.append_event(value, self._params.event_buffer_size)
+
+    def _task_executor_callback(self, message: HarvestState) -> None:
+        """调度类型化状态：镜像 + 轨迹上下文 + FSM 时序 + 落盘 + 作业票."""
+        value = to_task_executor_state(message)
+        self._state.update('task_executor', 'state', value)
+        self._track_run_context(value)
+        self._track_fsm(message)
+        self._record_raw('task_executor_state_topic', message)
+        self._publish_job()
+
+    def _track_run_context(self, value: dict) -> None:
+        """轨迹上下文与账本 run_id 跟随（换 run / 目标清空上一轮轨迹与路标）."""
+        previous_tid = self._traj_target_id
+        new_tid = str(value['target_id'] or '')
+        self._traj_ctx['target_id'] = new_tid
+        self._traj_ctx['phase'] = int(value['target_phase'] or 0)
+        run_id = str(value['run_id'] or '')
+        run_changed = bool(run_id) and run_id != self._traj_run_id
+        target_changed = bool(new_tid) and bool(previous_tid) and new_tid != previous_tid
+        if run_changed or target_changed:
+            if run_changed:
+                self._traj_run_id = run_id
+                self._traj_target_id = ''
+            if self._tcp_path is not None:
+                self._tcp_path.clear()
+            self._traj_landmarks.clear()
+            self._viz_bundle_sig = None
+            self._last_marker_sig = None
+        if new_tid:
+            self._traj_target_id = new_tid
+        # run_id 即账本目录名（supervisor：_run_id = goal.request_id）
+        terminal = (int(value.get('batch_state') or 0) in (6, 8)
+                    or int(value.get('target_phase') or 0) in (9, 10, 11))
+        key = (run_id, str(value.get('cycle_id') or ''), new_tid, terminal)
+        with self._ledger_context_lock:
+            previous = self._ledger_state_key
+            refresh = (previous is None or key[:3] != previous[:3]
+                       or (terminal and not previous[3]))
+            self._ledger_request_id = run_id
+            self._ledger_state_key = key
+        # 身份切换或进入终态时立即读一次；心跳仍只走周期增量轮询。
+        if refresh:
+            self._refresh_ledger()
+
+    def _track_fsm(self, message: HarvestState) -> None:
+        """调度 FSM 时序：状态/相位/消息/使能任一变化记一条转移."""
+        entry = {
+            'batch_state': int(message.batch_state or 0),
+            'target_phase': int(message.target_phase or 0),
+            'message': str(message.message or ''),
+            'run_id': str(message.run_id or ''),
+            'cycle_id': str(message.cycle_id or ''),
+            'target_id': str(message.target_id or ''),
+            'recovery_required': bool(message.recovery_required),
+            'execution_enabled': bool(message.execution_enabled),
+            'grasp_enabled': bool(message.grasp_enabled),
+            'tool_enabled': bool(message.tool_enabled),
+            'state_seq': int(getattr(message, 'state_seq', 0) or 0),
+        }
+        key = (entry['run_id'], entry['cycle_id'], entry['target_id'],
+               entry['batch_state'], entry['target_phase'], entry['message'],
+               entry['recovery_required'], entry['execution_enabled'],
+               entry['grasp_enabled'], entry['tool_enabled'])
+        now = time.time()
+        if self._fsm_tracker.feed(key, entry, now):
+            self._state.update(
+                'pipeline', 'fsm', self._fsm_tracker.export(now))
+
+    def _targets_callback(self, message) -> None:
+        try:
+            value = to_target_observations(message)
+        except (AttributeError, TypeError, ValueError) as error:
+            self.get_logger().warning(f'目标快照转换失败: {error}')
+            return
+        self._state.update('perception', 'targets', value)
+        if self._recon_debug_extra:
+            self._publish_recon_diagnostics()
+        self._record_raw('target_observations_topic', message)
+
+    # ------------------------------------------------------------------
+    # 参数镜像：周期轮询白名单节点的 get_parameters，只读不写
+    # ------------------------------------------------------------------
+    def _create_param_watchers(self) -> None:
+        """为白名单节点建 get_parameters 客户端并启动轮询定时器."""
+        self._param_clients = {
+            name: self.create_client(
+                GetParameters, f'{name}/get_parameters',
+                callback_group=self._cb)
+            for name in PARAM_WATCHLIST
+        }
+        # 服务未就绪时静默跳过（节点可能未启动），不刷错误日志
+        with self._param_lock:
+            self._param_inflight.clear()
+        self._param_timer = self.create_timer(
+            self._params.param_poll_period_s, self._poll_params,
+            callback_group=self._cb)
+
+    def _poll_params(self) -> None:
+        """有界查询参数；过期请求撤下后重试，迟回只认当前请求身份."""
+        callbacks = []
+        with self._param_lock:
+            for name, client in self._param_clients.items():
+                pending = self._param_inflight.get(name)
+                if pending is not None:
+                    old_client, old_future, deadline = pending
+                    if time.monotonic() < deadline:
+                        continue
+                    del self._param_inflight[name]
+                    old_client.remove_pending_request(old_future)
+                if not client.service_is_ready():
+                    continue
+                request = GetParameters.Request()
+                request.names = list(PARAM_WATCHLIST[name])
+                try:
+                    future = client.call_async(request)
+                except (RuntimeError, rclpy.exceptions.RCLError):
+                    continue
+                self._param_inflight[name] = (
+                    client, future, time.monotonic() + _PARAM_REQUEST_TIMEOUT_S)
+                callbacks.append((name, future))
+        # 已完成的 future 可立即执行 callback，不能在参数锁内注册。
+        for name, future in callbacks:
+            future.add_done_callback(
+                lambda fut, node_name=name: self._on_params(node_name, fut))
+        self._refresh_ledger()
+
+    def _refresh_ledger(self) -> None:
+        """增量读账本；并发刷新不等待，迟回不能写入另一批的镜像."""
+        if not self._ledger_refresh_lock.acquire(blocking=False):
+            return
+        try:
+            with self._ledger_context_lock:
+                watch = self._ledger_watch
+                request_id = self._ledger_request_id
+            if watch is None:
+                return
+            payload = watch.refresh(request_id)
+            with self._ledger_context_lock:
+                if (payload is not None and watch is self._ledger_watch
+                        and request_id == self._ledger_request_id):
+                    self._state.update('ledger', 'live', payload)
+                elif payload is not None:
+                    # 未提交的签名不能阻止 A→B→A 后重新读回 A。
+                    watch.invalidate()
+        finally:
+            self._ledger_refresh_lock.release()
+
+    def _on_params(self, node_name: str, future) -> None:
+        """仅当前且未过期的响应可提交；旧请求不能清除新请求或污染镜像."""
+        with self._param_lock:
+            pending = self._param_inflight.get(node_name)
+            if pending is None or pending[1] is not future:
+                return
+            del self._param_inflight[node_name]
+            if time.monotonic() >= pending[2]:
+                return
+            try:
+                response = future.result()
+            except (RuntimeError, rclpy.exceptions.RCLError):
+                return
+            if response is None:
+                return
+            values = {
+                name: _parameter_scalar(value)
+                for name, value in zip(
+                    PARAM_WATCHLIST[node_name], response.values)
+            }
+            self._state.update_params(node_name, values)
+
+    # ------------------------------------------------------------------
+    # 性能采样：独立线程写 state，绝不占用 ROS 回调线程
+    # ------------------------------------------------------------------
+    def _create_metrics_sampler(self) -> None:
+        """按快照参数建性能采样线程（GPU 不可用时自动降级为 None）."""
+        self._metrics = MetricsSampler(
+            self._params.metrics_period_s,
+            list(self._params.metrics_process_patterns),
+            self._metrics_callback,
+            lambda msg: self.get_logger().warning(msg))
+
+    def _create_tcp_sampler(self) -> None:
+        """Latest TF 采 tcp；重建积分仍用精确时间戳，这里只给监控/落盘."""
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
+        self._traj_timer = self.create_timer(
+            self._params.trajectory_period_s, self._sample_tcp,
+            callback_group=self._cb)
+        if not self._params.trajectory_enabled:
+            return
+        self._tcp_path = TcpPathBuffer(
+            max_points=self._params.trajectory_max_points,
+            min_step_m=self._params.trajectory_min_step_m)
+        latched = QoSProfile(
+            depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self._tcp_path_pub = self.create_publisher(
+            NavPath, self._topic('tcp_path_topic'), latched)
+        self._tcp_marker_pub = self.create_publisher(
+            MarkerArray, self._topic('tcp_markers_topic'), latched)
+
+    def _publish_tcp_summary(self) -> None:
+        """把路径摘要写入 /api/state 的 robot.tcp（不含全点列）."""
+        if self._tcp_path is None:
+            return
+        summary = self._tcp_path.summary()
+        summary['frame_id'] = self._params.trajectory_base_frame
+        summary['tip_frame'] = self._params.trajectory_tip_frame
+        self._state.update('robot', 'tcp', summary)
+
+    def _sample_tool_frames(self) -> None:
+        """只读 latest TF 诊断：查 URDF 三个工具帧，不推测 TCP 局部轴."""
+        if self._tf_buffer is None:
+            return
+        frames = {}
+        for frame in ('tool_axis', 'sleeve_mouth', 'cutting_plane'):
+            row = {'available': False, 'position': [], 'orientation': [],
+                   'stamp_sec': None, 'frame_id': 'base_link',
+                   'age_s': None, 'error': ''}
+            try:
+                tf = self._tf_buffer.lookup_transform(
+                    'base_link', frame, rclpy.time.Time())
+                translation, rotation = tf.transform.translation, tf.transform.rotation
+                stamp = tf.header.stamp
+                sec = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+                row.update(available=sec > 0, stamp_sec=sec,
+                           position=[translation.x, translation.y, translation.z],
+                           orientation=[rotation.x, rotation.y, rotation.z, rotation.w],
+                           error='' if sec > 0 else 'unknown_stamp')
+            except TransformException as exc:
+                row['error'] = f'tf_unavailable:{exc}'
+            frames[frame] = row
+        # 单次替换完整字典，HTTP 不触碰 tf2 或 ROS executor.
+        self._tool_frames = frames
+
+    def _tool_frames_now(self) -> dict:
+        """从采样缓存按 ROS 时钟计算陈旧，查询失败不伪造最新工具位姿."""
+        now = self.get_clock().now().nanoseconds * 1e-9
+        frames = {}
+        for frame in ('tool_axis', 'sleeve_mouth', 'cutting_plane'):
+            row = dict(getattr(self, '_tool_frames', {}).get(frame, {
+                'available': False, 'position': [], 'orientation': [],
+                'stamp_sec': None, 'frame_id': 'base_link', 'age_s': None,
+                'error': 'tf_unavailable:not_sampled'}))
+            if row['stamp_sec'] is not None and row['stamp_sec'] > 0:
+                age = now - row['stamp_sec']
+                row['age_s'] = age if age <= -0.1 else max(0.0, age)
+                if row['available'] and age <= -0.1:
+                    row.update(available=False, error='clock_mismatch')
+                elif row['available'] and row['age_s'] > 1.0:
+                    row.update(available=False, error='stale')
+            frames[frame] = row
+        return frames
+
+    def _sample_tcp(self) -> None:
+        """周期查询 base←tip 与工具三帧；位移过门槛才落盘."""
+        self._sample_tool_frames()
+        if (
+            self._tcp_path is None or
+            self._tf_buffer is None or
+            self._params is None
+        ):
+            return
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                self._params.trajectory_base_frame,
+                self._params.trajectory_tip_frame,
+                rclpy.time.Time())
+        except TransformException:
+            self._tcp_path.note_tf_fail()
+            self._publish_tcp_summary()
+            self._maybe_publish_tcp_viz()
+            return
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        stamp = transform.header.stamp
+        kept = self._tcp_path.maybe_append({
+            't': float(stamp.sec) + float(stamp.nanosec) * 1e-9,
+            'x': float(translation.x),
+            'y': float(translation.y),
+            'z': float(translation.z),
+            'qx': float(rotation.x),
+            'qy': float(rotation.y),
+            'qz': float(rotation.z),
+            'qw': float(rotation.w),
+            'moving': self._traj_ctx['moving'],
+            'target_id': self._traj_ctx['target_id'],
+            'phase': self._traj_ctx['phase'],
+            'skill': self._traj_ctx['skill'],
+        })
+        # /tf 按记录器控制流限速进 bag，报告侧离线重算；此处驱动 Web/RViz。
+        self._publish_tcp_summary()
+        self._maybe_publish_tcp_viz(force=kept is not None)
+
+    def _landmarks_now(self) -> dict:
+        """作业票坐标优先，重建许可镜像补缺（入口/预抓取/轴）."""
+        return pipeline.merge_job_landmarks(
+            self._traj_landmarks, self._state.job())
+
+    def _maybe_publish_tcp_viz(self, force: bool = False) -> None:
+        """Path / MarkerArray 约 5 Hz；点写入或超时则发（transient_local）."""
+        now_ns = self.get_clock().now().nanoseconds
+        if not force and now_ns - self._last_viz_ns < 200_000_000:
+            return
+        self._last_viz_ns = now_ns
+        self._publish_tcp_viz()
+
+    def _tcp_viz_bundle(self, exported: dict, frame_id: str) -> tuple:
+        """
+        (downsample xyz, phases, TCP marker 字典)；带缓存共享给 RViz 与 HTTP.
+
+        轨迹末点/点数与路标都未变时直接命中缓存——/api/trajectory 每个网页
+        0.4s 轮询、RViz 5Hz 发布，两次构建同Marker 集是纯重复功。
+        """
+        xyz_flat = exported.get('xyz') or []
+        landmarks = self._landmarks_now()
+        signature = (
+            len(xyz_flat),
+            tuple(xyz_flat[-3:]) if xyz_flat else (),
+            json.dumps(landmarks, ensure_ascii=False, sort_keys=True),
+        )
+        if signature != self._viz_bundle_sig:
+            xyz, phases = downsample_path(
+                xyz_flat, exported.get('phase') or [], 800)
+            self._viz_bundle = (
+                xyz, phases,
+                build_tcp_marker_dicts(xyz, phases, landmarks, frame_id))
+            self._viz_bundle_sig = signature
+        return self._viz_bundle
+
+    def _publish_tcp_viz(self) -> None:
+        """与网页同源：downsample 后的 Path + MarkerArray."""
+        if (
+            self._tcp_path_pub is None or
+            self._tcp_marker_pub is None or
+            self._params is None
+        ):
+            return
+        exported = (
+            self._tcp_path.export() if self._tcp_path is not None else {})
+        frame_id = self._params.trajectory_base_frame
+        xyz, phases, markers = self._tcp_viz_bundle(exported, frame_id)
+        stamp = self.get_clock().now()
+        self._tcp_path_pub.publish(path_from_xyz(xyz, stamp, frame_id))
+        markers = list(markers)
+        markers.extend(self._selection_markers(frame_id))
+        # 反闪烁（R3 稳定呈现）：仅当图元集合（ns+id）变化时才发 DELETEALL
+        # 头，否则只重发 ADD 更新位姿——避免 20Hz 删-建在 RViz 里闪帧
+        sig = tuple((m.get('ns', ''), m.get('id', 0)) for m in markers)
+        if sig == self._last_marker_sig and markers and \
+                markers[0].get('action') == 3:
+            markers = markers[1:]
+        self._last_marker_sig = sig
+        self._tcp_marker_pub.publish(
+            marker_array_from_dicts(markers, stamp, frame_id))
+
+    def _selection_markers(self, frame_id: str) -> list:
+        """选择叠加输入：最近 targets_filtered 事件 + 当前观测位置."""
+        snapshot = self._state.snapshot()
+        targets = snapshot.get('perception', {}).get('targets') or {}
+        observations = targets.get('observations') or []
+        selected_id = str(
+            (snapshot.get('job') or {}).get('target_id')
+            or targets.get('selected_target_id') or '')
+        filtered: dict = {}
+        for event in reversed(self._state.events_snapshot() or []):
+            if event.get('code') != 'targets_filtered':
+                continue
+            try:
+                payload = json.loads(event.get('message') or '{}')
+                value = payload.get('filtered')
+                if isinstance(value, dict):
+                    filtered = {str(k): str(v) for k, v in value.items()}
+            except (ValueError, TypeError):
+                pass
+            break
+        return build_selection_marker_dicts(
+            observations, selected_id, filtered, frame_id)
+
+    def _spawn_startup_facts_writer(self, runs_root: Path) -> None:
+        """启动事实落盘 runs/session_*/startup.json（离线排障回答"当时跑的什么配置"）."""
+        facts = normalize_facts(parse_facts_json(self._params.startup_facts))
+        self._state.update('startup', 'facts', facts)
+        if not facts_valid(facts):
+            self.get_logger().info(
+                '无启动事实注入（独立起栈）；startup.json 不落盘')
+            return
+        recorder = self._recorder
+        if recorder is None or not recorder.enabled:
+            return
+        if self._startup_thread is not None and self._startup_thread.is_alive():
+            raise RuntimeError('上一启动事实写入线程尚未退出')
+        stop = threading.Event()
+        self._startup_stop = stop
+
+        def _write() -> None:
+            # 会话目录由 bag 写线程在 'open' 后命名，短轮询等它出现
+            deadline = time.monotonic() + 30.0
+            session = None
+            while time.monotonic() < deadline:
+                if stop.is_set():
+                    return
+                if recorder.session_dir is not None:
+                    session = Path(recorder.session_dir)
+                    break
+                if stop.wait(0.2):
+                    return
+            if stop.is_set():
+                return
+            if session is None:
+                self.get_logger().warning(
+                    '30s 内未获得会话目录，startup.json 未落盘')
+                return
+            try:
+                payload = json.dumps(facts, ensure_ascii=False, indent=2)
+                tmp = session / 'startup.json.tmp'
+                tmp.write_text(payload, encoding='utf-8')
+                tmp.replace(session / 'startup.json')
+            except OSError as exc:
+                self.get_logger().warning(f'startup.json 落盘失败: {exc}')
+
+        self._startup_thread = threading.Thread(
+            target=_write, name='peach-startup-facts', daemon=True)
+        self._startup_thread.start()
+
+    def _create_diagnostics(self) -> None:
+        """复用节点级 Updater，重配时不重复声明其参数或累积定时器."""
+        if self._diag is None:
+            self._diag = Updater(self, period=5.0)
+            self._diag.setHardwareID('peach_observability')
+            self._diag.add('session_recorder', self._diag_recorder)
+            self._diag.add('ingest_liveness', self._diag_ingest)
+        else:
+            self._diag.timer.reset()
+        self._diag.removeByName('selfcheck')
+        if self._selfcheck is not None:
+            self._diag.add('selfcheck', self._diag_selfcheck)
+
+    def _diag_selfcheck(self, stat) -> object:
+        """自检裁决投影：fail→ERROR / warn→WARN / pass→OK；未跑过→WARN."""
+        report = self._selfcheck.last_report if self._selfcheck else {}
+        if not report:
+            stat.summary(DiagnosticStatus.WARN, 'selfcheck not run yet')
+            return stat
+        level = {'pass': DiagnosticStatus.OK,
+                 'warn': DiagnosticStatus.WARN,
+                 'fail': DiagnosticStatus.ERROR}.get(
+                     report.get('status'), DiagnosticStatus.WARN)
+        stat.summary(level, str(report.get('summary', '')))
+        stat.add('checked_at', str(report.get('checked_at')))
+        stat.add('trigger', str(report.get('trigger')))
+        stat.add('failed', ','.join(report.get('failed', [])))
+        stat.add('warned', ','.join(report.get('warned', [])))
+        controllers = self._selfcheck.controller_states() \
+            if self._selfcheck else None
+        stat.add('controllers',
+                 json.dumps(controllers, ensure_ascii=False)
+                 if controllers else 'n/a')
+        return stat
+
+    def _diag_recorder(self, stat) -> object:
+        """打开/写入/封口错误报 ERROR；队列丢帧与尚未打开报 WARN."""
+        info = self._recorder.info() if self._recorder is not None else {}
+        if not info.get('enabled'):
+            stat.summary(DiagnosticStatus.OK, 'record disabled by config')
+        elif info.get('open_failed'):
+            stat.summary(DiagnosticStatus.ERROR, 'bag open failed; not recording')
+        elif info.get('write_errors', 0) > 0:
+            stat.summary(
+                DiagnosticStatus.ERROR, f"bag write errors={info['write_errors']}")
+        elif info.get('close_error'):
+            stat.summary(DiagnosticStatus.ERROR, f"bag close failed: {info['close_error']}")
+        elif info.get('drops', 0) > 0:
+            stat.summary(
+                DiagnosticStatus.WARN,
+                f"bag queue drops={info['drops']} (disk behind, oldest dropped)")
+        elif not info.get('directory'):
+            stat.summary(DiagnosticStatus.WARN, 'waiting for bag open')
+        else:
+            stat.summary(DiagnosticStatus.OK, 'recording')
+        stat.add('queue_size', str(info.get('queue_size')))
+        stat.add('queue_depth', str(info.get('queue_depth')))
+        stat.add('drops', str(info.get('drops', 0)))
+        stat.add('open_failed', str(info.get('open_failed', False)))
+        stat.add('write_errors', str(info.get('write_errors', 0)))
+        stat.add('close_error', str(info.get('close_error', '')))
+        stat.add('session', str(info.get('session')))
+        return stat
+
+    def _diag_ingest(self, stat) -> object:
+        """订阅摄入活度：最热键年龄 ≤10s OK / ≤60s WARN / 更久 STALE."""
+        ages = self._state.topic_ages()
+        if not ages:
+            stat.summary(DiagnosticStatus.WARN, 'no ingest yet')
+            stat.add('watched_keys', '0')
+            return stat
+        newest = min(ages.values())
+        oldest = sorted(ages.items(), key=lambda item: -item[1])[:3]
+        if newest <= 10.0:
+            stat.summary(DiagnosticStatus.OK, f'ingesting (newest {newest}s)')
+        elif newest <= 60.0:
+            stat.summary(DiagnosticStatus.WARN, f'quiet (newest {newest}s)')
+        else:
+            stat.summary(DiagnosticStatus.STALE, f'silent {newest}s')
+        stat.add('watched_keys', str(len(ages)))
+        stat.add('newest_age_s', str(newest))
+        stat.add(
+            'oldest_keys',
+            ', '.join(f'{key}:{age}s' for key, age in oldest))
+        return stat
+
+    def _metrics_callback(self, sample: dict) -> None:
+        """性能采样：镜像进状态缓存，并发布 JSON 进会话 bag."""
+        self._state.update('metrics', 'sample', sample)
+        if self._metrics_pub is not None:
+            message = String(data=json.dumps(sample, ensure_ascii=False))
+            self._metrics_pub.publish(message)
+            self._record_raw('metrics_topic', message)
+
+    # ------------------------------------------------------------------
+    # 单步调试（enabled → 运动门 → 审计；无令牌）
+    # ------------------------------------------------------------------
+    def _create_debug_bridge(self) -> None:
+        """装配审计器；debug.enabled=true 才建转发桥（否则 POST 503 仍可审计）."""
+        self._debug_audit = DebugAudit(
+            str(resolve_runs_root(self._params.record_root_dir)),
+            self._params.debug_audit_enabled,
+            lambda msg: self.get_logger().warning(msg))
+        from .param_panel import ParamBridge
+        self._param_bridge = ParamBridge(self, self._on_param_change)
+        self._param_bridge.open_all()
+        if not self._params.debug_enabled:
+            self.get_logger().info('调试操作面未启用（debug.enabled=false）')
+            return
+        self._debug_bridge = DebugBridge(
+            self, self._params.debug_endpoints,
+            self._params.debug_action_timeout_s,
+            self._params.debug_motion_enabled,
+            lambda msg: self.get_logger().warning(msg))
+        self._debug_bridge.open_all()
+        motion_state = '放行' if self._params.debug_motion_enabled else '默认拒绝'
+        self.get_logger().warning(
+            f'*** 调试操作面已启用：运动类操作={motion_state}。'
+            '技能侧既有安全门照常生效；请保持 HTTP 回环绑定 ***')
+
+    def debug_command(self, action: str, payload: dict, headers) -> tuple:
+        """
+        调试操作门控（HttpBackend 窄接口）：总开关 → 运动 → 桥 → 审计.
+
+        Args:
+            action: 调试端点键.
+            payload: 已解析 JSON 请求体.
+            headers: HTTP 请求头（兼容旧客户端；不再校验令牌）.
+
+        Returns
+        -------
+            (http_status, 响应 dict)；每次调用（含被拒）均写审计.
+
+        """
+        del headers
+        row = {'action': action, 'args': payload}
+
+        def audit(accepted: bool, status: int, message: str) -> tuple:
+            row.update({'accepted': accepted, 'status': status,
+                        'message': message})
+            if self._debug_audit is not None:
+                self._debug_audit.record(row)
+            return status, {'accepted': accepted, 'message': message}
+
+        # 自检触发（非运动类）：立即复检并回报告；不进动作/服务桥
+        if action == 'selfcheck':
+            if self._selfcheck is None:
+                return audit(False, 503, '自检未启用（selfcheck.enabled=false）')
+            report = self._selfcheck.run('manual')
+            row.update({'accepted': True, 'status': 200,
+                        'result': report.get('summary')})
+            if self._debug_audit is not None:
+                self._debug_audit.record(row)
+            return 200, {'accepted': True, 'message': report.get('summary', ''),
+                         'result': report}
+
+        if (self._debug_bridge is None or self._params is None
+                or not self._params.debug_enabled):
+            return audit(False, 503, '调试操作面未启用（debug.enabled=false）')
+        if is_motion(action, payload) and not self._params.debug_motion_enabled:
+            return audit(
+                False, 423,
+                '运动类操作被拒绝：debug.motion_enabled=false（会动臂/机位的'
+                '操作须显式开启该开关；技能侧安全门仍会独立复核）')
+        try:
+            status, body = self._debug_bridge.command(action, payload)
+        except (TypeError, ValueError, RuntimeError, OSError, KeyError,
+                AttributeError) as exc:
+            return audit(False, 500, f'调试桥异常: {exc}')
+        accepted = bool(body.get('accepted'))
+        row.update({'accepted': accepted, 'status': status,
+                    'result': body.get('result')})
+        if self._debug_audit is not None:
+            self._debug_audit.record(row)
+        return status, body
+
+    def _on_param_change(self, name: str, value) -> None:
+        """参数面板写入后同步节点缓存（否则 debug_command/快照仍读旧值）."""
+        if name == 'debug.enabled':
+            self._params.debug_enabled = bool(value)
+        elif name == 'debug.motion_enabled':
+            self._params.debug_motion_enabled = bool(value)
+            if self._debug_bridge is not None:
+                self._debug_bridge._motion_enabled = bool(value)
+        elif name == 'record.enabled':
+            self._params.record_enabled = bool(value)
+        elif name == 'record.level':
+            self._params.record_level = str(value)
+
+    def params_report(self) -> dict:
+        """调试台参数面板：只读列出白名单节点/参数当前值."""
+        if self._param_bridge is None:
+            return {'groups': [], 'error': '参数面板未启用'}
+        return self._param_bridge.report()
+
+    def transport_config(self) -> dict:
+        """Expose static transport/schema metadata, without ROS parameter calls."""
+        from .param_panel import PARAM_GROUPS
+        facts = parse_facts_json(self._params.startup_facts)
+        # Standalone observability serves HTTP without starting a ROS bridge.
+        enabled = flag_enabled(facts.get('rosbridge_enabled', False))
+        return {
+            'default': 'rosbridge' if enabled else 'http',
+            'url': f"ws://127.0.0.1:{int(facts.get('rosbridge_port', 9090))}",
+            'groups': PARAM_GROUPS,
+            'endpoints': dict(self._params.debug_endpoints),
+            'topics': {key: self.resolve_topic_name(name)
+                       for key, name in WEB_TOPICS.items()},
+        }
+
+    def params_set(self, payload: dict) -> tuple:
+        """调试台参数面板：白名单写入 + 运动门 + 审计；读走 params_report."""
+        if self._param_bridge is None:
+            return 503, {'accepted': False, 'message': '参数面板未启用'}
+        if self._params is None or not self._params.debug_enabled:
+            return 503, {'accepted': False,
+                         'message': 'debug.enabled=false，参数写入已关闭'}
+        changes = payload.get('changes') if isinstance(payload, dict) else None
+        status, body = self._param_bridge.set(changes)
+        if self._debug_audit is not None:
+            self._debug_audit.record({
+                'action': 'params', 'args': payload,
+                'accepted': bool(body.get('accepted')),
+                'status': status, 'message': body.get('message', ''),
+                'result': body,
+            })
+        return status, body
+
+    # ------------------------------------------------------------------
+    # HttpBackend：浏览器状态、图像、轨迹与历史分析的只读投影
+    # ------------------------------------------------------------------
+    def snapshot(self) -> dict:
+        """浏览器状态快照（GET /api/state 的载荷，含 debug 段）."""
+        snapshot = self._state.snapshot()
+        snapshot['images'] = self._images_now()
+        snapshot['debug'] = {
+            'enabled': bool(
+                self._params.debug_enabled if self._params else False),
+            'motion_enabled': bool(
+                self._params.debug_motion_enabled if self._params else False),
+            'recent': (
+                self._debug_bridge.state().get('recent', [])
+                if self._debug_bridge is not None else []),
+        }
+        with self._log_lock:
+            snapshot['logs'] = list(self._logs)
+        return snapshot
+
+    def force(self) -> dict:
+        """Return the latest five-channel force frame for the live panel."""
+        message = self._force_sample
+        if message is None:
+            return {'available': False, 'error': 'no_frame'}
+        now_ns = self.get_clock().now().nanoseconds
+        stamp_ns = (int(message.header.stamp.sec) * 1_000_000_000
+                    + int(message.header.stamp.nanosec))
+        # A healthy HTTP connection cannot make a stopped/replayed sensor fresh.
+        receive_age_s = (now_ns - self._force_rx_ns) * 1e-9
+        source_age_s = (now_ns - stamp_ns) * 1e-9
+        if min(receive_age_s, source_age_s) <= -0.1:
+            return {'available': False, 'error': 'clock_mismatch',
+                    'age_s': min(receive_age_s, source_age_s)}
+        age_s = max(0.0, receive_age_s, source_age_s)
+        if age_s > 1.5:
+            return {'available': False, 'error': 'stale', 'age_s': age_s}
+        return {
+            'available': True,
+            'age_s': age_s,
+            'source_uuid': str(message.source_uuid),
+            'sequence': int(message.sequence),
+            'channel_ids': [int(v) for v in message.channel_ids],
+            'force_n': [float(v) for v in message.force_n],
+            'travel_mm': [float(v) for v in message.travel_mm],
+            'ad': [int(v) for v in message.ad],
+            'status': [int(v) for v in message.status],
+            'stamp_ns': stamp_ns,
+            'frame_id': str(message.header.frame_id),
+        }
+
+    def _images_now(self) -> dict:
+        """返回两流预览状态，即使录制关闭或尚未 configure."""
+        preview = getattr(self, '_image_preview', None)
+        if preview is not None:
+            return preview.metadata(self.get_clock().now().nanoseconds * 1e-9)
+        return {key: {'available': False, 'stamp_sec': None, 'stamp_ns': None,
+                      'frame_id': '', 'width': 0, 'height': 0,
+                      'error': 'no_frame', 'age_s': None}
+                for key in ('perception', 'raw')}
+
+    def image(self, stream: str) -> tuple:
+        """HTTP 只取 JPEG 字节与相同帧元数据，不做图像转换."""
+        preview = getattr(self, '_image_preview', None)
+        if preview is None:
+            return None, self._images_now()[stream]
+        return preview.jpeg(stream, self.get_clock().now().nanoseconds * 1e-9)
+
+    def _runs_root(self):
+        return resolve_runs_root(
+            self._params.record_root_dir if self._params else None)
+
+    def analysis_success(self) -> dict:
+        """每次抓取的套入完成率。不改监控状态."""
+        from .record_analysis import success_summary
+        return success_summary(self._runs_root())
+
+    def analysis_records(self) -> dict:
+        """列出 runs 里可解析的测试目录。不改监控状态."""
+        from .record_analysis import list_records
+        root = self._runs_root()
+        return {'root': str(root), 'records': list_records(root)}
+
+    def analysis_report(self, relative: str) -> dict:
+        """解析用户选定的记录目录."""
+        from .record_analysis import analyze_record
+        return analyze_record(self._runs_root(), relative)
+
+    def analysis_image(self, relative: str, name: str) -> bytes | None:
+        """返回该记录目录里已列入分析的一张图."""
+        from .record_analysis import read_record_image
+        return read_record_image(self._runs_root(), relative, name)
+
+    def trajectory(self) -> dict:
+        """末端轨迹 + 当前作业票路标（GET /api/trajectory）."""
+        payload = {
+            'frame_id': (
+                self._params.trajectory_base_frame if self._params else
+                'base_link'),
+            'tip_frame': (
+                self._params.trajectory_tip_frame if self._params else 'tcp'),
+            'enabled': bool(
+                self._params.trajectory_enabled if self._params else False),
+            'tf_ok': False,
+            'tf_failures': 0,
+            't': [],
+            'xyz': [],
+            'moving': [],
+            'phase': [],
+            'metrics': {},
+            'landmarks': {},
+            'tool_frames': self._tool_frames_now(),
+        }
+        if self._tcp_path is not None:
+            payload.update(self._tcp_path.export())
+            payload['frame_id'] = self._params.trajectory_base_frame
+            payload['tip_frame'] = self._params.trajectory_tip_frame
+            payload['enabled'] = True
+            bundle_source = {
+                'xyz': payload.get('xyz') or [],
+                'phase': payload.get('phase') or [],
+            }
+        else:
+            bundle_source = {'xyz': [], 'phase': []}
+        # 与 RViz 发布共享同一份 downsample+markers（轨迹/路标未变时命中缓存）
+        _, _, markers = self._tcp_viz_bundle(bundle_source, payload['frame_id'])
+        payload['markers'] = markers
+        payload['landmarks'] = self._landmarks_now()
+        payload['topics'] = {
+            'path': (
+                self._topic('tcp_path_topic') if self._params else
+                '/peach/observability/tcp_path'),
+            'markers': (
+                self._topic('tcp_markers_topic') if self._params else
+                '/peach/observability/markers'),
+        }
+        return payload
+
+    def _publish_job(self) -> None:
+        """作业票指纹变化时发布 JSON 话题并进会话 bag（bag_report 离线消费）."""
+        if self._job_pub is None:
+            return
+        job = self._state.job()
+        if not job:
+            return
+        key = json.dumps({
+            'target_id': job.get('target_id'),
+            'active_id': job.get('active_id'),
+            'why': job.get('why'),
+            'stages': [
+                (item.get('id'), item.get('status'))
+                for item in job.get('stages') or []],
+            'allowed': (job.get('grasp') or {}).get('allowed'),
+            'reason': (job.get('grasp') or {}).get('reason'),
+            'skill': (job.get('motion') or {}).get('state'),
+            'flags': job.get('flags'),
+        }, ensure_ascii=False, sort_keys=True)
+        if key == self._last_job_key:
+            return
+        self._last_job_key = key
+        message = String(data=json.dumps(job, ensure_ascii=False))
+        self._job_pub.publish(message)
+        self._record_raw('job_topic', message)
+
+    def ensure_active(self) -> None:
+        """
+        进入 Active 并开 HTTP.
+
+        整栈 include 时 launch 的 lifecycle EmitEvent 经常匹配不到本节点
+        （不进 lifecycle 名单），这里在 spin 前自行转换（共享 helper）。
+        """
+        ensure_lifecycle_active(self)
+
+    def start_http(self) -> None:
+        """按快照参数提示非回环风险并启动 HTTP 服务线程."""
+        if self._http is not None:
+            return
+        host = self._params.host
+        port = self._params.port
+        if host not in ('127.0.0.1', 'localhost'):
+            self.get_logger().warning(
+                f'*** 安全提示：Web 监听在非回环地址 {host}:{port}，'
+                '严禁暴露到公网或不受信网络 ***')
+        # 静态页资源由 peach_web 安装，本包只托管 HTTP
+        web_root = Path(get_package_share_directory(
+            'peach_web')) / 'web'
+        self._http = http_server.start_http(
+            host, port, web_root, self, self.get_logger().debug)
+        if self._metrics is not None:
+            self._metrics.start()
+        shown_host = '127.0.0.1' if host == '0.0.0.0' else host
+        mode = '过程监控+单步调试' if self._params.debug_enabled \
+            else '只读监控'
+        self.get_logger().info(f'感知抓取过程页（{mode}）: '
+                               f'http://{shown_host}:{port}')
+
+    def _stop_runtime(self) -> None:
+        """停 HTTP 与性能采样；订阅仍保留到 cleanup."""
+        streams = getattr(self, '_web_streams', None)
+        if streams is not None:
+            streams.close()
+            self._web_streams = None
+        if self._metrics is not None:
+            self._metrics.stop()
+        if self._http is not None:
+            self._http.shutdown()
+            self._http.server_close()
+            self._http = None
+
+    def _release_resources(self) -> None:
+        """释放 configure 期资源，允许再次 configure."""
+        if self._startup_stop is not None:
+            self._startup_stop.set()
+        if self._startup_thread is not None:
+            self._startup_thread.join(timeout=5.0)
+            if self._startup_thread.is_alive():
+                raise RuntimeError('启动事实写入线程未退出，保留资源等待收口')
+            self._startup_thread = None
+        self._startup_stop = None
+        if self._diag is not None:
+            self._diag.timer.cancel()
+        preview = getattr(self, '_image_preview', None)
+        self._image_preview = None
+        if preview is not None:
+            preview.close()
+        self._tool_frames = {}
+        self._recon_debug_extra = {}
+        self._recon_typed_value = {}
+        self._recon_debug_context = None
+        if self._sweep_thread is not None:
+            self._sweep_thread.join(timeout=5.0)
+            self._sweep_thread = None
+        if self._selfcheck is not None:
+            self._selfcheck.destroy()
+            self._selfcheck = None
+        if self._traj_timer is not None:
+            self.destroy_timer(self._traj_timer)
+            self._traj_timer = None
+        if self._tcp_path_pub is not None:
+            self.destroy_publisher(self._tcp_path_pub)
+            self._tcp_path_pub = None
+        if self._tcp_marker_pub is not None:
+            self.destroy_publisher(self._tcp_marker_pub)
+            self._tcp_marker_pub = None
+        if self._tf_listener is not None:
+            self._tf_listener.unregister()
+        self._tf_listener = None
+        self._tf_buffer = None
+        self._tcp_path = None
+        if self._param_timer is not None:
+            self.destroy_timer(self._param_timer)
+            self._param_timer = None
+        for sub in self._subs:
+            self.destroy_subscription(sub)
+        self._subs.clear()
+        with self._param_lock:
+            for client, future, _ in self._param_inflight.values():
+                client.remove_pending_request(future)
+            self._param_inflight.clear()
+            clients = list(self._param_clients.values())
+            self._param_clients.clear()
+        for client in clients:
+            self.destroy_client(client)
+        if self._param_bridge is not None:
+            self._param_bridge.close()
+            self._param_bridge = None
+        if self._debug_bridge is not None:
+            self._debug_bridge.close()
+            self._debug_bridge = None
+        self._debug_audit = None
+        self._fsm_tracker.reset()
+        self._arm_tracker.reset()
+        with self._ledger_context_lock:
+            self._ledger_watch = None
+            self._ledger_request_id = ''
+            self._ledger_state_key = None
+        for attribute in ('_job_pub', '_metrics_pub'):
+            publisher = getattr(self, attribute)
+            if publisher is not None:
+                self.destroy_publisher(publisher)
+                setattr(self, attribute, None)
+        self._stop_recording()
+        self._metrics = None
+        self._params = None
+
+    # ------------------------------------------------------------------
+    # 会话收尾：bag 封口后由同进程组子进程分析，退出等待有界。
+    # ------------------------------------------------------------------
+    def _stop_recording(self) -> None:
+        """先停通配订阅再关 bag：否则 close 的 join 会被持续入队撑死."""
+        if self._catch_all is not None:
+            self._catch_all.stop()
+            self._catch_all = None
+        self._spawn_report(self._close_recorder())
+
+    def _close_recorder(self):
+        """关 bag（排空写队列）；返回 bag 目录，未启用/重复调用给 None."""
+        recorder, self._recorder = self._recorder, None
+        if recorder is None:
+            return None
+        try:
+            return recorder.close()
+        finally:
+            self._state.update('record', 'info', recorder.info())
+
+    def _spawn_report(self, bag_dir) -> None:
+        """封口后启动独立分析进程，重活不得阻止 ROS 节点退出."""
+        if bag_dir is None or (
+                self._report_process is not None
+                and self._report_process.poll() is None):
+            return
+        params = self._params
+        runs_root = str(
+            resolve_runs_root(params.record_root_dir)) if params else str(
+            Path(bag_dir).parent.parent)
+
+        command = [sys.executable, '-m', 'peach_observability.bag_report',
+                   str(bag_dir), '--ledger-root', runs_root,
+                   '--base-frame', params.trajectory_base_frame if params else 'base_link',
+                   '--tip-frame', params.trajectory_tip_frame if params else 'tcp',
+                   '--max-total-bag-gb', str(params.record_max_total_bag_gb if params else 0.0)]
+        # 继承 launch 进程组，自动报告同样归属本轮退出清理，不脱离成为后台任务。
+        self._report_process = subprocess.Popen(command, start_new_session=False)
+
+    def join_report(self, timeout: float = 30.0) -> None:
+        """有界等分析，再终止/回收；超时仍保留已封口 bag 供离线重算."""
+        process = self._report_process
+        if process is None:
+            return
+        try:
+            code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            print('bag 自动分析超时；保留已封口 bag，请离线重算报告',
+                  file=sys.stderr, flush=True)
+            process.terminate()
+            try:
+                code = process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                code = process.wait(timeout=2.0)
+        if code != 0:
+            print(f'bag 自动分析退出码 {code}；请离线重算报告', file=sys.stderr, flush=True)
+        self._report_process = None
+
+    def destroy_node(self):
+        """停止 HTTP/性能采样，先停通配录制再收尾 bag 并起自动报告后销毁 ROS 节点."""
+        self._stop_runtime()
+        self._stop_recording()
+        self._release_resources()
+        super().destroy_node()
+
+
+def main(args=None):
+    """运行 ROS 观测与 HTTP 调试服务；HTTP 在 Lifecycle Active 后才监听."""
+    rclpy.init(args=args)
+    node = ObservabilityNode()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
+    node.ensure_active()
+    try:
+        executor.spin()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        executor.shutdown()
+        node.destroy_node()
+        node.join_report()
+        if rclpy.ok():
+            rclpy.shutdown()

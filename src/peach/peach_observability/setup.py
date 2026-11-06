@@ -1,0 +1,54 @@
+from glob import glob
+import os
+from pathlib import Path
+import sys
+
+from setuptools import find_packages, setup
+
+if len(sys.argv) < 2 or sys.argv[1] != 'clean':
+    from generate_parameter_library_py.setup_helper import generate_parameter_module
+    generate_parameter_module(
+        'observability_parameters', 'config/observability_parameters.yaml')
+
+package_name = 'peach_observability'
+
+
+def _resolve_python():
+    """工作区 venv 存在则用作 console_scripts shebang."""
+    # 2026-10-10 分组重组后包在 src/peach/<pkg>/，工作区根是 parents[3]
+    ws_venv = Path(__file__).resolve().parents[3] / 'aubo_py3.12' / 'bin' / 'python'
+    if ws_venv.exists():
+        return str(ws_venv)
+    return sys.executable
+
+
+setup(
+    name=package_name,
+    version='0.1.0',
+    packages=find_packages(exclude=['test']),
+    data_files=[
+        ('share/ament_index/resource_index/packages',
+         ['resource/' + package_name]),
+        (os.path.join('share', package_name), ['package.xml', 'LICENSE', 'README.md']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'config'),
+         [os.path.join('config', f) for f in sorted(os.listdir('config'))
+          if f.endswith('.yaml')]),
+    ],
+    install_requires=['setuptools'],
+    extras_require={'test': ['pytest']},
+    zip_safe=True,
+    maintainer='wjz',
+    maintainer_email='2155413529@qq.com',
+    description='Peach observability and rosbag2 recording.',
+    license='BSD-3-Clause',
+    entry_points={
+        'console_scripts': [
+            'peach_observability = peach_observability.observability_node:main',
+            'peach_bag_report = peach_observability.bag_report:main',
+        ],
+    },
+    options={
+        'build_scripts': {'executable': _resolve_python()},
+    },
+)

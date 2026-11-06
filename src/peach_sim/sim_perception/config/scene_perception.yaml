@@ -1,0 +1,19 @@
+# Simulation-only overlay. Load the current peach_scene_perception full YAML first.
+# RGB-D topics and optical frames follow the shared camera contract.
+peach_scene_perception_node:
+  ros__parameters:
+    use_sim_time: true
+    calibration_version: 'gazebo:ideal-640x480-hfov63-depth-m|handeye:harvester_unified-xacro'
+    depth_scale_unit: 1.0  # uint16 millimetres; Gazebo 32FC1 metres ignores this factor.
+    yolo_model_path: '$(find-pkg-share peach_scene_perception)/model/best.pt'
+    sam_model_path: '$(find-pkg-share peach_scene_perception)/model/mobile_sam.pt'
+    yolo_conf: 0.12
+    min_detection_conf: 0.12
+    sync_queue_size: 3
+    max_frame_age_s: 2.0
+    publish_debug_image: true
+    publish_masks: true
+    harvest:
+      min_collect_frames: 4
+      lock_settle_frames: 2
+      max_collect_s: 12.0
