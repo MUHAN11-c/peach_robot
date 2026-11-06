@@ -1,6 +1,7 @@
 # AUBO E5 ROS 2 Jazzy
 
 GitHub 完整源码：[MUHAN11-c/peach_robot](https://github.com/MUHAN11-c/peach_robot)。
+过程记录：[GitHub 上传发布](docs/releases/v1.0.0-github-publication.md)。
 稳定交付：[v1.0.0 Release](https://github.com/MUHAN11-c/peach_robot/releases/tag/v1.0.0)，
 含完整部署包、SHA-256、文件清单与实际验收报告。支持 Ubuntu 24.04 amd64 CPU 的 mock / 冻结回放。
 

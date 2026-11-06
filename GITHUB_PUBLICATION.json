@@ -14,7 +14,8 @@
     "README_PACKAGE.md portable download entry",
     ".gitignore explicit minimal fixture and selected evidence allowlist",
     ".gitattributes binary classification",
-    "six .gitkeep markers for empty directories"
+    "six .gitkeep markers for empty directories",
+    "docs/releases/v1.0.0-github-publication.md live publication record"
   ],
   "accepted_scope": "Ubuntu 24.04 amd64 / ROS Jazzy / Python 3.12 / CPU mock and frozen replay",
   "checks": {
