@@ -24,5 +24,13 @@
     "http_fixture_browser_passed": 28,
     "mock_single_target_level": 6,
     "tool_enabled": false
+  },
+  "remote_release": {
+    "url": "https://github.com/MUHAN11-c/peach_robot/releases/tag/v1.0.0",
+    "release_id": 436964178,
+    "tag_commit": "c7656511ba4b1075ff03e79ba356a40b01aa9d2c",
+    "asset_count": 7,
+    "asset_sha256_verified": true,
+    "latest": true
   }
 }
