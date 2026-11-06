@@ -42,3 +42,11 @@
 ## 工作区其他源码
 
 完整导航见 [工作区 README](../README.md)。IVG 12 包在 [独立栈导航](../src/ivg/README.md)，仿真六包在 [peach_sim](../src/peach_sim/README.md)，标定与相机分别见 [标定包](../src/aubo_hand_eye_calibration/README.md) 和 [Percipio](../src/percipio_camera/README.md)。这些文档描述当前实现与已知缺口，历史结果不作本轮运行验收。只读驱动文档的旧路径/IMU/octomap/标定字段差异集中记在 [整栈架构](../src/peach/peach_bringup/doc/architecture.md#只读驱动文档的现状差异)，驱动文件本身不改。
+
+## 部署与版本记录
+
+- [部署指南](../scripts/deployment/README.md)：环境准备、自动构建、mock 与隔离验证。
+- [打包与恢复](../README_PACKAGE.md)：交付内容、迁移和校验方式。
+- [v1.0.0 版本说明](releases/v1.0.0.md)：支持范围、已知限制和验收依据。
+- [部署验证过程](deployment-validation-20261107.md)：从零环境安装的发现、修正与原始证据。
+- [GitHub 上传发布过程](releases/v1.0.0-github-publication.md)：提交、标签、附件和远端校验记录。
